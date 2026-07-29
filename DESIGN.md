@@ -136,9 +136,32 @@ tiles/sharded) log key, so "Ed25519 behind a feature" is untenable. Decision:
 - Ed25519 and checkpoint/signed-note parsing are mandatory dependencies.
 - v0.1.0 implements Rekor v1 fully (SET + inclusion + checkpoint) and
   *detects* v2 entries with a typed `Unsupported` error.
-- v2 verification is a fast-follow (v0.1.x) — promoted into v0.1.0 if live
-  GitHub fixtures gathered during implementation show GitHub already emits
-  v2 entries. Fixture check is the trigger, not a guess.
+- v2 verification is a fast-follow (v0.1.x). **Settled by live fixtures
+  (2026-07-29):** GitHub's `attest-build-provenance` path still emits Rekor
+  v1 entries (`kind: dsse, version: 0.0.1`) with SET + inclusion proof +
+  checkpoint — see `tests/fixtures/README.md`. v1-normative v0.1.0 stands.
+
+## Fixture findings (2026-07-29, cli/cli v2.96.0)
+
+Captured real-world facts that bind this design (details in
+`tests/fixtures/README.md`):
+
+- **Multi-subject statements are the normal case.** The workflow provenance
+  statement carries all 21 release artifacts as subjects; subject matching
+  means finding the caller's digest in a set, and "multiple subjects" is not
+  an edge case or an error.
+- **GitHub now auto-attests public release assets itself** (`initiator:
+  github`): bundle with RFC 3161 TSA timestamp, no tlog entries, predicate
+  `in-toto release/v0.2`, verifiable only against GitHub's own trust root
+  (six `fulcio.githubapp.com` CAs, six TSAs, no logs). This flavor is v0.2
+  scope alongside private repos — same mechanism.
+- **Acquisition shape:** the attestations API no longer inlines bundles; it
+  returns `initiator`, `repository_id`, and a short-lived `bundle_url`
+  serving raw-snappy-compressed bundle JSON. Fetching/decompression stays in
+  the future companion crate; `BundleSet` parses the fetched forms.
+- The public-good root currently lists both the Rekor v1 P-256 log and the
+  Rekor v2 Ed25519 log (`log2025-1.rekor.sigstore.dev`) — confirming the
+  mandatory-Ed25519 decision.
 
 ## Rekor-entry ↔ bundle binding (normative)
 
@@ -316,8 +339,10 @@ fail-closed.
 - v0.1.0: verification core as specified; Rekor v1 normative; v2 typed
   `Unsupported` (promoted if fixtures show GitHub emits v2).
 - v0.1.x: Rekor v2 verification.
-- v0.2: GitHub private-repo attestations via injected trust root; npm-
-  provenance and Homebrew profiles atop the invariant chain.
+- v0.2: GitHub-trust-root verification (RFC 3161 TSA path) — covers both
+  `initiator: github` release attestations on public repos and private-repo
+  attestations; npm-provenance and Homebrew profiles atop the invariant
+  chain.
 - v0.3: companion acquisition crate (`-fetch`/`-tuf`), tiny CLI (potential
   gh extension), possible `attested-update` sugar crate, upstream
   self_update PR.
@@ -354,8 +379,6 @@ finalized at implementation.
 
 ## Remaining open items
 
-- Gather live GitHub fixtures early to settle the Rekor v1/v2 emission
-  question (drives the v0.1.0/v0.1.x split).
 - Choose or hand-roll ref-glob matching (dependency-budget sensitive).
 - MSRV number.
 - Second-implementer review of the X.509 profile before it is frozen.
