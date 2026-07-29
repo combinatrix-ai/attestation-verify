@@ -1,6 +1,6 @@
 # attestation-verify — Design
 
-Status: draft for counterpart review
+Status: revision 2 — counterpart review (Codex/Sol lane) applied
 Date: 2026-07-29
 Owner: combinatrix-ai
 
@@ -37,199 +37,338 @@ archives). Dogfooding is the acceptance test.
 
 1. Verify a GitHub artifact attestation bundle against an artifact digest,
    fully offline.
-2. Full verification chain, no shortcuts (see "Verification chain").
-3. Identity policy with safe defaults; numeric repo-owner ID matching is
-   first-class (rename/resurrection resistance, same judgment as gh CLI).
-4. Dependency budget: **< 60 transitive crates**, pure-Rust crypto
-   (RustCrypto stack only), no HTTP client, no protobuf toolchain.
-5. sans-io: no network, no filesystem access, no wall clock (see below).
-6. Fail-closed: no "skip this check" knobs in the public API. The only
-   configuration is *what identity to require*, never *how much to verify*.
-7. Embeddable everywhere dlgt builds: the 6-target zig cross-build matrix
-   (mac x86_64/aarch64, linux gnu/musl x86_64/aarch64) must pass.
+2. Full verification chain with a **normative time-evidence model** (below):
+   no step is optional, and the only configuration is *what identity to
+   require*, never *how much to verify*.
+3. Identity policy that separates **source identity** from **signer-workflow
+   identity**, with numeric owner and repository IDs first-class and exact
+   release-ref binding for updater callers.
+4. Dependency discipline: pure-Rust crypto (RustCrypto stack), no HTTP
+   client, no protobuf toolchain. Budget: **target < 60, ceiling < 80**
+   transitive crates (metric defined below); the number becomes a public
+   promise only after the prototype passes all correctness gates.
+5. sans-io: no network, no filesystem access, no wall clock inside
+   verification. Determinism is *relative to a caller-selected trust-root
+   snapshot and authenticated timestamp evidence* — see "Time-evidence
+   model" for exactly what this does and does not establish.
+6. Embeddable everywhere dlgt builds: the 6-target zig cross-build matrix
+   (mac x86_64/aarch64, linux gnu/musl x86_64/aarch64) must pass with
+   `--locked`, and cryptographic fixture tests must run natively on macOS and
+   Linux.
 
 ## Non-goals (v0.1)
 
 Signing. OCI/container verification. Key-based cosign signatures.
-npm-provenance / Homebrew profiles (same bundle format; deliberately deferred,
-architecture must not preclude them). GitHub private-repo attestations
-(different trust root; kept possible via root injection, not implemented).
-HTTP fetching of any kind. A TUF client. WASM target (not designed against,
-not tested in v0.1).
+npm-provenance / Homebrew profiles (same bundle format; deferred, and the
+invariant-verification/profile split below keeps them possible).
+GitHub private-repo attestations (different trust root; kept possible via
+root injection). HTTP fetching of any kind — acquisition belongs in a future
+companion crate (`attestation-verify-fetch` / `-tuf`), not behind a feature
+flag on the minimal core. A TUF client. Streaming subject hashing (deferred;
+v0.1 takes a precomputed digest or a byte slice). WASM (not designed
+against, not tested).
 
 ## Core decisions
 
-1. **sans-io core.** Inputs are values: artifact digest, bundle JSON, trusted
-   root, policy. Output is a verified-facts struct or a typed error. All
-   acquisition (downloading archives, bundle assets, refreshing roots) is the
-   caller's business. This is where the dependency budget comes from.
-2. **Hand-modeled serde types** for the Sigstore bundle (v0.3 JSON, protojson
-   encoding), the trusted root, and the in-toto statement — only the subset we
-   verify. No `prost`/`sigstore_protobuf_specs`.
-3. **Embedded trusted root, swappable.** Vendor the Sigstore public-good
-   `trusted_root.json` in the crate (`TrustedRoot::embedded()`); refresh it
-   via crate releases. Accept caller-supplied roots
-   (`TrustedRoot::from_json`), format-compatible with
-   `gh attestation trusted-root` output. No TUF: this is the deliberate
-   lightweight answer, and the staleness semantics are documented rather than
-   hidden. Historical key material in the root (validity windows) keeps old
-   artifacts verifiable.
-4. **No wall clock.** Certificate validity and trust-root key windows are
-   checked against the transparency-log integrated time (the Sigstore model
-   for short-lived certs), not `SystemTime::now()`. Verification is therefore
-   deterministic and reproducible; root *freshness* is a separate,
-   caller-visible concern.
-5. **GithubPolicy with safe defaults.** Matches Fulcio certificate extensions
-   (OID arc 1.3.6.1.4.1.57264.1.*): OIDC issuer must be
-   `https://token.actions.githubusercontent.com`; repository; numeric owner
-   ID (first-class, recommended); workflow path; source ref glob
-   (`refs/tags/*`); optionally trigger event. Repo-name-only matching is
-   possible but the docs and examples push owner-ID pinning.
-6. **Rich verified output.** On success return the proven facts: repository,
-   owner ID, workflow ref, commit SHA, run identity, trigger, log index,
-   integrated time — so callers can log, display, or enforce further.
-7. **Error taxonomy distinguishes attack-shaped from config-shaped.**
-   `Tampered`, `UntrustedCertificate`, `LogInconsistent` vs
-   `PolicyMismatch { expected, found }`, `StaleRoot { .. }`, `Malformed`.
-   Callers (e.g. an updater) can decide to hard-fail vs explain.
+1. **sans-io core.** Inputs are values: subject digest, bundle, trust
+   snapshot, policy. Output is a provenance-separated report or a mechanical
+   typed error. All acquisition is the caller's business.
+2. **Hand-modeled serde types** for the bundle (v0.3 protojson), trusted
+   root, and in-toto statement subset. No `prost`. Parsers are hardened:
+   size/count/depth limits, duplicate-key rejection, strict base64/hex,
+   exactly one DSSE signature, media-type enforcement, unknown
+   kind/version → typed `Unsupported`, never best-effort.
+3. **Embedded trusted root, swappable, identified.** Vendor the Sigstore
+   public-good `trusted_root.json` (`TrustStore::embedded_public_good()`);
+   accept caller-supplied roots (`TrustStore::from_json`, format-compatible
+   with `gh attestation trusted-root` output). No TUF in-core. Every report
+   and every trust error carries the snapshot's fingerprint/version/date so
+   operators can see which root made the decision.
+4. **Time-evidence model is normative** (next section). Certificate and log-
+   key validity are checked against *authenticated* log time only.
+5. **`Verifier` is the primary API**; `verify()` is a thin convenience.
+   Policy and trust material are validated once at build time and reused.
+6. **Identity policy split**: `SourcePolicy` (repository identity + ref +
+   optional commit) and `SignerPolicy` (workflow repository + path +
+   revision), because reusable workflows make "repository + workflow path"
+   ambiguous and unsafe on its own.
+7. **Provenance-separated output.** Certificate-derived facts, transparency-
+   log facts, and workflow-controlled statement content have different trust
+   provenance and are never flattened into one struct.
+8. **Mechanical error taxonomy.** Errors state what check failed, not the
+   attacker's intent: `Parse`, `Unsupported`, `Trust`, `Certificate`,
+   `Transparency`, `Timestamp`, `ContentBinding`, `Policy`, `ResourceLimit`
+   (all `#[non_exhaustive]`). No `Tampered`, no inferred `StaleRoot`; root
+   freshness is a separate caller-supplied-`as_of` assessment, never derived
+   from attacker-controlled bundle data.
 
-## Verification chain (spec level)
+## Time-evidence model (normative)
 
-Given (subject digest, bundle, trusted root, policy):
+For GitHub's expected no-TSA Rekor v1 bundles, an inclusion proof alone does
+NOT authenticate `integratedTime` — it proves body inclusion under a
+checkpoint, while `integratedTime`/`logID`/`logIndex` are separate metadata
+authenticated only by the SET (inclusion promise). Both are therefore
+required; they answer different questions:
 
-1. Parse bundle (v0.3): DSSE envelope + verification material (leaf
-   certificate, tlog entries, no TSA data expected for public GitHub).
-2. Build and verify the certificate chain from the leaf to a Fulcio CA in the
-   trusted root; check key-usage/extensions appropriate for Fulcio leaves.
-3. Verify the SCT embedded in the leaf against the CT log keys in the root.
-4. Verify the DSSE PAE signature with the leaf key (ECDSA P-256; P-384
-   supported).
-5. Verify the Rekor tlog entry: inclusion proof against the checkpoint,
-   checkpoint signature against the Rekor key in the root; entry body must
-   be consistent with the DSSE envelope (kind `dsse`/`intoto`).
-6. Time consistency: integrated time must fall within leaf-certificate
-   validity and within the validity window of the log keys used.
-7. Parse the in-toto statement: `_type` in-toto v1, subject digest (sha256)
-   must equal the caller's subject; predicate type must be SLSA provenance v1
-   (configurable allow-list later, not a free-for-all).
-8. Apply GithubPolicy to the certificate claims.
+1. Bind the Rekor entry body field-by-field to the bundle (list below).
+2. Verify the Merkle inclusion proof against the checkpoint root/tree size.
+3. Verify the signed checkpoint (origin, root, tree size) against the
+   trusted log key.
+4. Verify the SET over the canonical entry body + integration metadata.
+5. Only then use `integratedTime` to check leaf-certificate validity and
+   trust-root key validity windows.
 
-Every step has a corresponding typed error and at least one negative test.
+If a bundle carries a verified RFC 3161 timestamp (future), it may establish
+signing time, but the inclusion proof remains required and a present SET is
+still verified.
+
+What this model deliberately does NOT establish (callers own these):
+trust-snapshot currency, post-snapshot revocation, rejection of future-dated
+(but correctly signed) log times, artifact freshness/latest-version, and
+rollback protection. An updater binds the requested release tag via policy
+(exact ref), which is the rollback answer at that layer.
+
+## Rekor v1 / v2 scope
+
+The current public-good trusted root already contains a Rekor v2 (Ed25519,
+tiles/sharded) log key, so "Ed25519 behind a feature" is untenable. Decision:
+
+- Ed25519 and checkpoint/signed-note parsing are mandatory dependencies.
+- v0.1.0 implements Rekor v1 fully (SET + inclusion + checkpoint) and
+  *detects* v2 entries with a typed `Unsupported` error.
+- v2 verification is a fast-follow (v0.1.x) — promoted into v0.1.0 if live
+  GitHub fixtures gathered during implementation show GitHub already emits
+  v2 entries. Fixture check is the trigger, not a guess.
+
+## Rekor-entry ↔ bundle binding (normative)
+
+Reject unless ALL hold (Rekor v1): entry signature == the single DSSE
+signature; entry certificate/key == bundle leaf; entry payload hash ==
+decoded DSSE payload hash; entry kind/version in the supported exact set
+(`dsse`/`intoto`, pinned versions); SET canonical body == inclusion-leaf
+body; entry `logIndex` == proof index; proof root/tree size == checkpoint
+root/tree size; `logId` == selected trusted key; checkpoint origin == trusted
+log identity. (Modeled on Cosign GHSA-whqx-f9j3-ch6m, where an unrelated
+valid Rekor entry satisfied verification; regression fixtures reproduce that
+shape.)
+
+## X.509 / Fulcio validation profile (normative)
+
+Local path validation implemented against a *declared* profile — `x509-cert`
+supplies parsing only. The profile specifies: leaf/intermediate/root
+selection with bundle-supplied roots never trusted; allowed signature
+algorithms and curve/hash mapping (P-256 leaves; P-384 required for current
+Fulcio CA signatures); basic-constraints and path-length enforcement; leaf
+and CA KU/EKU requirements (code-signing EKU on leaves); rejection on
+unknown critical extensions; certificate validity at every accepted
+authenticated signing time; trusted-root CA `validFor` windows; Fulcio
+certificate-profile checks; duplicate/malformed identity-extension
+rejection; deterministic behavior on chain ambiguity and superfluous
+embedded roots.
+
+**SCT verification is day one** (Sigstore's model: never trust unlogged
+certificates): embedded SCT extraction with exact CT serialization,
+signature verification in correct precertificate/issuer context, CT log
+key selection from the root, SCT time within the CT key validity window,
+threshold ≥ 1 distinct trusted CT log. An SCT is evidence about certificate
+issuance; it is not artifact-signing time and cannot replace SET/TSA.
+
+## Identity policy
+
+```rust
+GithubPolicy {
+    source: SourcePolicy {          // where the code came from
+        repository: RepositoryIdentity,   // owner/name + numeric owner ID
+                                          // + numeric repository ID when present
+        git_ref: RefPolicy,               // Exact("refs/tags/v0.4.0") | Glob(...)
+        commit: Option<CommitSha>,
+    },
+    signer: SignerPolicy {          // which workflow signed (reusable-workflow safe)
+        repository: RepositoryIdentity,
+        path: WorkflowPath,               // ".github/workflows/release.yml"
+        revision: WorkflowRevisionPolicy,
+    },
+    // issuer pinned internally to https://token.actions.githubusercontent.com
+}
+```
+
+Numeric owner ID protects against owner rename/recreation; numeric
+repository ID protects against repository rename/transfer/recreation.
+Updaters exact-match the requested release ref (`Exact`); globs exist but
+are documented as the weaker form, not showcased as the default.
 
 ## API sketch
 
 ```rust
-use attestation_verify::{Bundle, GithubPolicy, Subject, TrustedRoot, verify};
+use attestation_verify::{Bundle, BundleSet, GithubPolicy, TrustStore, Verifier};
 
-let root = TrustedRoot::embedded();                  // vendored public-good root
-let bundle = Bundle::from_json(&bundle_bytes)?;      // .sigstore.json / API / gh download forms
-let subject = Subject::sha256_of(&artifact_bytes);   // or Subject::from_digest_hex(...)
-
-let policy = GithubPolicy::builder("combinatrix-ai/dlgt")
-    .owner_id(OWNER_ID)                              // numeric; recommended
-    .workflow(".github/workflows/release.yml")
-    .source_ref("refs/tags/*")
+let verifier = Verifier::builder()
+    .trust_store(TrustStore::embedded_public_good())
+    .github_policy(policy)                       // validated here, once
     .build()?;
 
-let facts = verify(&root, &subject, &bundle, &policy)?;
-println!("built by {} @ {}", facts.workflow_ref, facts.commit_sha);
+let bundle = Bundle::from_json(&bundle_bytes)?;  // exactly one bundle
+// containers are explicit — no sniffing:
+// BundleSet::from_github_response(..) / BundleSet::from_json_lines(..)
+
+let report = verifier.verify_digest(&sha256_digest, &bundle)?;
+// or: verifier.verify_bytes(&artifact_bytes, &bundle)?;
+
+// provenance-separated result:
+report.subject;       // VerifiedSubject
+report.signer;        // VerifiedCertificateIdentity (cert-derived claims)
+report.transparency;  // VerifiedTransparency (log index, integrated time)
+report.statement;     // VerifiedSignedStatement (signed ≠ independently true)
+report.trust;         // TrustSnapshotInfo (root fingerprint/version/date)
 ```
 
-Open sub-questions: free function vs a `Verifier` struct holding
-(root, policy) for reuse across many artifacts; whether `Subject` should
-offer a streaming hasher (`impl Write`) for large archives.
+`verify()` remains as a one-shot convenience wrapper. `verify_digest` /
+`verify_bytes` are distinct names so digests and artifact bytes cannot be
+confused. `BundleSet` verification defines its success semantics explicitly
+(policy-satisfying bundle found; per-bundle failures retained for
+diagnostics). Profile extension points (npm/Homebrew later) run only *after*
+the invariant cryptographic chain — no trait allows a profile to accept a
+result before mandatory checks.
 
-## Bundle acquisition conventions (documented, not implemented)
+## Trust-root operations (documented commitments)
 
-- Recommended release-asset convention: attach the bundle as
-  `<artifact-filename>.sigstore.json` next to each artifact. Discoverable via
-  any release-listing API, including self_update's `ReleaseList`.
-- Accepted input shapes: a bare bundle JSON, the GitHub attestation API
-  response (`{"attestations":[{"bundle":...}]}`), and `gh attestation
-  download` JSONL. One `Bundle::from_json` entry point sniffs these.
+- Release overlap: publish releases verifiable by both old and new roots
+  before retiring keys; historical key windows keep old artifacts
+  verifiable.
+- Snapshot identity (fingerprint/version/date) reported on success and in
+  trust errors.
+- Documented manual recovery for a stale updater (fetch root via
+  `gh attestation trusted-root` or upgrade out-of-band); a root shipped
+  beside the artifact is never accepted unless independently authenticated.
+- Offline roots have no built-in expiration and cannot surface
+  post-snapshot revocations — stated in docs, surfaced via the separate
+  `as_of` freshness assessment API.
 
-## Dependency budget (target)
+## Dependencies (target)
 
 `serde`, `serde_json`, `sha2`, `p256`, `p384`, `ecdsa`, `signature`,
-`x509-cert`, `der`, `spki`, `const-oid`, `base64`, `hex`, `thiserror`.
-(`ed25519-dalek` only if checkpoint key types require it, behind a feature.)
+`ed25519-dalek` (mandatory: current Rekor v2 key), `x509-cert`, `der`,
+`spki`, `const-oid`, `base64`, `hex`, `thiserror`, plus small pieces for
+checkpoint/signed-note parsing and ref matching (hand-rolled where
+reasonable).
 
-CI enforces the budget: a test fails if the transitive crate count exceeds 60.
-CI also runs the 6-target zigbuild matrix to guarantee downstream
-embeddability in dlgt-like release pipelines.
+Budget metric: unique normal+build dependencies for the default feature set,
+per supported target, excluding dev-deps, measured by `cargo tree`. Target
+< 60, ceiling < 80 — correctness is never traded for the number (no
+hand-written PKI shortcuts to hit a marketing figure). CI enforces the
+ceiling, the 6-target `--locked` zigbuild matrix, and native crypto fixture
+tests on macOS + Linux.
 
 ## Testing strategy
 
-- Golden fixtures: real bundles + artifacts from dlgt releases (and one
-  gh-CLI-produced fixture from another public repo for diversity).
-- Mutation negatives, one per chain step: flipped artifact byte, certificate
-  from another repo, stripped tlog entry, broken inclusion proof, integrated
-  time outside cert validity, wrong subject digest, wrong predicate type,
-  policy mismatches (owner ID, workflow, ref).
-- Determinism test: verification result is identical regardless of system
-  clock.
-- Later: sigstore-conformance subset, parser fuzzing (cargo-fuzz).
-- Acceptance: dlgt update verifies its own release fail-closed using this
-  crate.
+- Golden fixtures: real bundles + artifacts from dlgt releases, plus
+  gh-CLI-produced fixtures from an unrelated public repo.
+- **Release gates for v0.1**: sigstore-conformance subset, and differential
+  verification against `sigstore-go`/`gh attestation verify` for every
+  golden fixture (accept/reject parity).
+- Mutation negatives — per chain step AND the cross-binding class:
+  unrelated-but-valid Rekor entry/SET (advisory shape); altered unsigned
+  `integratedTime`; SET without proof and proof without SET; index/tree-
+  size/root/origin mismatches; wrong log ID; v1/v2 confusion; unsupported
+  kind/version; zero/multiple DSSE signatures; wrong payload type; malformed
+  PAE; high-S ECDSA; untrusted embedded root; reordered chain; CA-constraint
+  and KU/EKU violations; unknown critical extension; SCT wrong issuer/key/
+  altered/out-of-window; cert valid at SCT time but not SET time; duplicate
+  or malformed Fulcio extensions; source vs reusable signer-workflow
+  confusion; owner/repo rename-recreation-transfer; case normalization;
+  exact-tag mismatch hidden by glob; empty/multiple subjects; malformed or
+  unknown digest; duplicate JSON keys; oversized inputs, deep nesting,
+  integer overflow, negative index/time; root rotation and stale-updater
+  recovery.
+- Determinism test: identical results regardless of system clock.
+- Fuzz targets + hard resource limits ship with the first parser; corpus
+  maturity grows later.
+- Acceptance: dlgt update verifies its own release fail-closed.
 
 ## self_update composition and upstream strategy
 
-self_update (10.3M downloads; 1.0.0-rc series iterating actively as of
-2026-07) exposes building blocks (`ReleaseList`, `Download`, `Extract`,
-re-exported `self_replace`) but its one-shot `update()` has no custom
-verification hook (zipsign only). Composition works today: list → download
-archive + `<name>.sigstore.json` → `attestation_verify::verify` → extract →
-self-replace. Once this crate is public, propose an `attestations` feature
-upstream (engine = this crate, default-off); the 1.0-rc window is the moment
-to raise the API-shape issue so the hook is not precluded.
+self_update (10.3M downloads; 1.0.0-rc iterating actively 2026-07) exposes
+building blocks (`ReleaseList`, `Download`, `Extract`, re-exported
+`self_replace`) but one-shot `update()` has no custom verification hook
+(zipsign only). Composition works today: list → download archive +
+`<name>.sigstore.json` → `Verifier::verify_bytes` → extract → self-replace.
+Once public, propose an `attestations` feature upstream (engine = this
+crate, default-off); raise the API-shape issue during the 1.0-rc window so
+the hook is not precluded.
+
+Bundle conventions: recommend attaching `<artifact-filename>.sigstore.json`
+per artifact; accepted container inputs are the GitHub attestation API
+response and `gh attestation download` JSONL via explicit `BundleSet`
+constructors.
 
 ## dlgt integration plan (first consumer)
 
 Prerequisite in dlgt's release.yml: attest the six archives and the checksum
-manifest; attach bundles as release assets per the naming convention above.
-Then `dlgt update`: download archive + bundle (curl, as today) → verify with
-policy (owner combinatrix-ai pinned by ID, repo dlgt, workflow
-`.github/workflows/release.yml`, `refs/tags/*`) → only then hand off to the
-installer (which re-checks sha256 from the verified manifest). Rollout:
-warn-only in one release, fail-closed in the next.
+manifest; attach bundles as release assets. Then `dlgt update`: download
+archive + bundle (curl, as today) → verify with source repo
+`combinatrix-ai/dlgt` pinned by numeric IDs, signer workflow
+`.github/workflows/release.yml`, **exact ref = the requested release tag**
+→ only then hand off to the installer. Rollout: warn-only one release, then
+fail-closed.
 
 ## Roadmap
 
-- v0.1: verification core as designed here.
-- v0.2: GitHub private-repo attestations via injected trust root;
-  npm-provenance and Homebrew profiles (same bundle format, different
-  identity policies).
-- v0.3: optional `fetch` feature (attestation API + root refresh); a tiny CLI
-  (potentially doubling as a gh extension); possibly an `attested-update`
-  sugar crate for updater flows; upstream self_update PR.
+- v0.1.0: verification core as specified; Rekor v1 normative; v2 typed
+  `Unsupported` (promoted if fixtures show GitHub emits v2).
+- v0.1.x: Rekor v2 verification.
+- v0.2: GitHub private-repo attestations via injected trust root; npm-
+  provenance and Homebrew profiles atop the invariant chain.
+- v0.3: companion acquisition crate (`-fetch`/`-tuf`), tiny CLI (potential
+  gh extension), possible `attested-update` sugar crate, upstream
+  self_update PR.
 
 ## Naming
 
 Crate and repo: `attestation-verify` (crates.io availability confirmed
-2026-07-29). Rejected: `gh-attestation` (name of GitHub's own early-access
-extension; reads official), `attested` (collides with the TEE/remote-
-attestation term space), `attested-updates` (names the first use case, not
-the thing; reserved-in-spirit for the future updater sugar crate). In
-supply-chain tooling, unqualified "attestation" is the in-toto/SLSA/GitHub
-term; TEE usage is qualified ("remote attestation"), and crates.io keywords
-disambiguate.
+2026-07-29). Rejected: `gh-attestation` (GitHub's own early-access extension
+name; reads official), `attested` (TEE/remote-attestation term space),
+`attested-updates` (names the first use case; reserved-in-spirit for the
+future updater sugar crate). In supply-chain tooling, unqualified
+"attestation" is the in-toto/SLSA/GitHub term; TEE usage is qualified.
 
 License: MIT OR Apache-2.0. MSRV: latest stable minus a small window,
 finalized at implementation.
 
-## Open questions for review
+## Resolved questions (counterpart review, 2026-07-29)
 
-1. Is deferring SCT verification acceptable for v0.1, or is it load-bearing
-   from day one? (Current position: in scope, day one.)
-2. Rekor entry verification: inclusion proof + checkpoint only, or also
-   accept SET (signed entry timestamp) for older entries?
-3. Any holes in the "no wall clock" determinism claim?
-4. TrustedRoot staleness UX: typed `StaleRoot` error with guidance vs plain
-   verification failure when key windows don't cover the integrated time.
-5. `verify()` free function vs reusable `Verifier` — which surface ages
-   better, especially for the future multi-profile (npm/Homebrew) world?
-6. Is the < 60 crate budget realistic given x509-cert + ecdsa + p384, or
-   should the budget be restated (e.g. < 80) before it becomes a public
-   promise?
-7. Streaming `Subject` hashing in v0.1 or defer?
-8. Anything in this design that would preclude the v0.2/v0.3 roadmap items?
+1. SCT: in scope day one — load-bearing CT evidence (not signing time).
+2. SET vs checkpoint: BOTH required for GitHub no-TSA v1 bundles; SET-only
+   legacy excluded unless real fixtures force it.
+3. No-wall-clock: restated as determinism relative to snapshot +
+   authenticated time; freshness/future-dating/revocation/latest are caller
+   policy.
+4. Staleness UX: mechanical `UnknownLogKey`/`NoTrustedKeyValidAt` errors +
+   separate `as_of` freshness assessment; never inferred from bundle data.
+5. API: `Verifier` primary; `verify()` convenience wrapper;
+   `verify_digest`/`verify_bytes` distinct.
+6. Budget: <60 target, <80 ceiling, metric pinned, promise deferred until
+   the prototype passes correctness gates.
+7. Streaming subject: deferred from v0.1.
+8. Roadmap compatibility: invariant chain vs profile split; multi-root,
+   multi-log-version model; acquisition/TUF in companion crates.
+
+## Remaining open items
+
+- Gather live GitHub fixtures early to settle the Rekor v1/v2 emission
+  question (drives the v0.1.0/v0.1.x split).
+- Choose or hand-roll ref-glob matching (dependency-budget sensitive).
+- MSRV number.
+- Second-implementer review of the X.509 profile before it is frozen.
+
+## Revision log
+
+- r1 (2026-07-29): initial draft.
+- r2 (2026-07-29): counterpart review applied — normative time-evidence
+  model (SET + checkpoint both required); field-by-field Rekor↔bundle
+  binding (GHSA-whqx-f9j3-ch6m shape); Rekor v2/Ed25519 scope decision;
+  X.509/Fulcio profile made explicit; SCT detailed; source/signer policy
+  split + numeric repo ID + exact release-ref binding; provenance-separated
+  report; Verifier-primary API; Bundle/BundleSet explicit constructors;
+  mechanical error taxonomy; trust-root operational commitments; budget
+  restated (<60 target/<80 ceiling) with pinned metric; conformance +
+  differential testing promoted to release gates; streaming and fetch cut.
