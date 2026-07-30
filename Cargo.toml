@@ -1,0 +1,36 @@
+[package]
+name = "attestation-verify"
+version = "0.0.1"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Verify GitHub Artifact Attestations (Sigstore bundles) offline - minimal, sans-io, fail-closed"
+repository = "https://github.com/combinatrix-ai/attestation-verify"
+keywords = ["github", "attestation", "sigstore", "slsa", "supply-chain"]
+categories = ["cryptography", "authentication"]
+publish = false
+
+[dependencies]
+base64 = "0.23.0"
+hex = "0.4.3"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sha2 = "0.11.0"
+thiserror = "2.0.19"
+
+# Integration tests (tests/) compile as a separate crate and only see the
+# library's public API plus [dev-dependencies] — not its own [dependencies]
+# — so `base64` and `serde_json` are re-listed here for the fixture-JSON
+# mutation tests. Same crates already used by the library itself; this adds
+# no new dependency and does not appear under `cargo tree --edges normal`.
+[dev-dependencies]
+base64 = "0.23.0"
+serde_json = "1.0.151"
+
+[lints.rust]
+missing_docs = "deny"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+dbg_macro = "deny"
