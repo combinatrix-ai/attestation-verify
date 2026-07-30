@@ -1,6 +1,6 @@
 //! Trusted-root (`application/vnd.dev.sigstore.trustedroot+json;version=0.1`)
-//! parsing: Fulcio certificate authorities, Rekor transparency logs, and
-//! timestamp authorities.
+//! parsing: Fulcio certificate authorities, Rekor transparency logs,
+//! Certificate Transparency logs, and timestamp authorities.
 //!
 //! Format-compatible with `gh attestation trusted-root` output (split into
 //! one JSON document per root; see `tests/fixtures/trusted-roots/`).
@@ -32,6 +32,11 @@ pub struct TrustStore {
     pub media_type: String,
     /// Rekor transparency logs.
     pub tlogs: Vec<TransparencyLog>,
+    /// Certificate Transparency logs, used to verify embedded SCTs
+    /// (DESIGN.md "X.509 / Fulcio validation profile"). Empty for trust
+    /// roots that carry no CT logs (e.g. GitHub's own trust root, which
+    /// has no transparency logs of any kind).
+    pub ctlogs: Vec<CtLog>,
     /// Fulcio certificate authorities.
     pub certificate_authorities: Vec<CertificateAuthority>,
     /// RFC 3161 timestamp authorities. Same shape as
@@ -80,6 +85,7 @@ impl TrustStore {
         let RawTrustedRoot {
             media_type,
             tlogs,
+            ctlogs,
             certificate_authorities,
             timestamp_authorities,
         } = raw;
@@ -92,6 +98,10 @@ impl TrustStore {
             .into_iter()
             .map(TransparencyLog::from_raw)
             .collect::<Result<Vec<_>, _>>()?;
+        let ctlogs = ctlogs
+            .into_iter()
+            .map(CtLog::from_raw)
+            .collect::<Result<Vec<_>, _>>()?;
         let certificate_authorities = certificate_authorities
             .into_iter()
             .map(CertificateAuthority::from_raw)
@@ -103,6 +113,7 @@ impl TrustStore {
         Ok(TrustStore {
             media_type,
             tlogs,
+            ctlogs,
             certificate_authorities,
             timestamp_authorities,
         })
@@ -146,6 +157,48 @@ impl TransparencyLog {
             public_key,
             log_id_key_id,
             checkpoint_key_id,
+        })
+    }
+}
+
+/// A Certificate Transparency log (`ctlogs[]`), used to verify embedded
+/// SCTs (DESIGN.md "X.509 / Fulcio validation profile").
+///
+/// Same shape as [`TransparencyLog`] in the source format minus
+/// `checkpointKeyId`: CT logs are verified via SCTs, not Rekor-style
+/// signed checkpoints, so the source format never carries one for these
+/// entries. Modeled as its own type (rather than reusing
+/// [`TransparencyLog`], as [`CertificateAuthority`] is reused for
+/// `timestamp_authorities`) so a CT log can never be mistaken for
+/// carrying checkpoint-verification data it does not have.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CtLog {
+    /// The log's base URL, e.g. `"https://ctfe.sigstore.dev/2022"`.
+    pub base_url: String,
+    /// The log's hash algorithm, e.g. `"SHA2_256"`.
+    pub hash_algorithm: String,
+    /// The log's signing key.
+    pub public_key: PublicKey,
+    /// The log's id (`logId.keyId`), base64-decoded.
+    pub log_id_key_id: Vec<u8>,
+}
+
+impl CtLog {
+    fn from_raw(raw: RawTlog) -> Result<Self, Error> {
+        let RawTlog {
+            base_url,
+            hash_algorithm,
+            public_key,
+            log_id,
+            checkpoint_key_id: _,
+        } = raw;
+        let public_key = PublicKey::from_raw(public_key)?;
+        let log_id_key_id = parse_util::strict_base64("ctlogs[].logId.keyId", &log_id.key_id)?;
+        Ok(CtLog {
+            base_url,
+            hash_algorithm,
+            public_key,
+            log_id_key_id,
         })
     }
 }
@@ -273,6 +326,8 @@ struct RawTrustedRoot {
     #[serde(default)]
     tlogs: Vec<RawTlog>,
     #[serde(default)]
+    ctlogs: Vec<RawTlog>,
+    #[serde(default)]
     certificate_authorities: Vec<RawCertificateAuthority>,
     #[serde(default)]
     timestamp_authorities: Vec<RawCertificateAuthority>,
@@ -360,6 +415,31 @@ mod tests {
         )
     }
 
+    /// A single `ctlogs[]` entry with the same shape as a `tlogs[]` entry
+    /// (DESIGN.md task: "Model it identically"), minus `checkpointKeyId`.
+    fn minimal_json_with_one_ctlog() -> String {
+        format!(
+            r#"{{
+                "mediaType": "{TRUSTED_ROOT_MEDIA_TYPE}",
+                "tlogs": [],
+                "ctlogs": [
+                    {{
+                        "baseUrl": "https://ctfe.example.test/2022",
+                        "hashAlgorithm": "SHA2_256",
+                        "publicKey": {{
+                            "rawBytes": "aGVsbG8=",
+                            "keyDetails": "PKIX_ECDSA_P256_SHA_256",
+                            "validFor": {{"start": "2022-01-01T00:00:00Z"}}
+                        }},
+                        "logId": {{"keyId": "d29ybGQ="}}
+                    }}
+                ],
+                "certificateAuthorities": [],
+                "timestampAuthorities": []
+            }}"#
+        )
+    }
+
     #[test]
     fn parses_minimal_valid_trust_root() -> Result<(), Box<dyn std::error::Error>> {
         let store = TrustStore::from_json(minimal_valid_json().as_bytes())?;
@@ -372,6 +452,45 @@ mod tests {
         }
         if ca.valid_for.end.is_some() {
             return Err("expected no validFor.end".into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn ctlogs_defaults_to_empty_when_absent() -> Result<(), Box<dyn std::error::Error>> {
+        // `minimal_valid_json()` has no "ctlogs" key at all (matching
+        // `github.json`'s real shape).
+        let store = TrustStore::from_json(minimal_valid_json().as_bytes())?;
+        if !store.ctlogs.is_empty() {
+            return Err(format!("expected 0 ctlogs, got {}", store.ctlogs.len()).into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn parses_one_ctlog() -> Result<(), Box<dyn std::error::Error>> {
+        let store = TrustStore::from_json(minimal_json_with_one_ctlog().as_bytes())?;
+        if store.ctlogs.len() != 1 {
+            return Err(format!("expected 1 ctlog, got {}", store.ctlogs.len()).into());
+        }
+        let ctlog = &store.ctlogs[0];
+        if ctlog.base_url != "https://ctfe.example.test/2022" {
+            return Err(format!("unexpected baseUrl: {}", ctlog.base_url).into());
+        }
+        if ctlog.hash_algorithm != "SHA2_256" {
+            return Err(format!("unexpected hashAlgorithm: {}", ctlog.hash_algorithm).into());
+        }
+        if ctlog.public_key.raw_bytes != b"hello" {
+            return Err("unexpected publicKey.rawBytes".into());
+        }
+        if ctlog.public_key.key_details != "PKIX_ECDSA_P256_SHA_256" {
+            return Err("unexpected publicKey.keyDetails".into());
+        }
+        if ctlog.public_key.valid_for.start != 1_640_995_200 {
+            return Err("unexpected publicKey.validFor.start".into());
+        }
+        if ctlog.log_id_key_id != b"world" {
+            return Err("unexpected logId.keyId".into());
         }
         Ok(())
     }

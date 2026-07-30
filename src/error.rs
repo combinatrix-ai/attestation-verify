@@ -204,6 +204,90 @@ pub enum CertificateError {
     /// Only P-256 and P-384 ECDSA are supported.
     #[error("unsupported public key algorithm")]
     UnsupportedKeyAlgorithm,
+
+    /// A certificate's declared signature algorithm was not ECDSA with
+    /// SHA-256 (P-256) or ECDSA with SHA-384 (P-384) -- the only
+    /// algorithms DESIGN.md's "X.509 / Fulcio validation profile" allows.
+    #[error("unsupported certificate signature algorithm")]
+    UnsupportedSignatureAlgorithm,
+
+    /// No certificate authority in the trust store produced a valid chain
+    /// from the leaf to a self-signed root. Bundle-supplied roots are
+    /// never trusted, so this is also the error for a leaf whose issuer
+    /// matches no trust-store entry at all.
+    #[error("no trusted certificate authority validated this certificate chain")]
+    UntrustedCertificate,
+
+    /// A certificate's signature did not cryptographically verify against
+    /// its issuer's public key.
+    #[error("certificate signature did not verify")]
+    SignatureInvalid,
+
+    /// A certificate's `issuer` did not DER-match its issuer certificate's
+    /// `subject`.
+    #[error("certificate issuer does not match issuing certificate's subject")]
+    IssuerNameMismatch,
+
+    /// The authenticated time fell outside a certificate's
+    /// `[notBefore, notAfter]` validity window.
+    #[error("authenticated time is outside the certificate's validity window")]
+    OutsideCertificateValidity,
+
+    /// The authenticated time fell outside the trust-store certificate
+    /// authority entry's `validFor` window.
+    #[error("authenticated time is outside the trusted certificate authority's validFor window")]
+    OutsideCaValidity,
+
+    /// A certificate's `basicConstraints` did not match what its role in
+    /// the chain requires: a certificate authority must be `CA:TRUE`, and
+    /// the leaf must have `basicConstraints` absent or `CA:FALSE`.
+    #[error("certificate basicConstraints does not match its role in the chain")]
+    InvalidBasicConstraints,
+
+    /// A certificate authority's `pathLenConstraint` was violated by the
+    /// number of certificate authorities subordinate to it in the chain.
+    #[error("certificate authority pathLenConstraint exceeded")]
+    PathLengthExceeded,
+
+    /// A certificate's `keyUsage` extension was absent, or lacked the bit
+    /// its role in the chain requires (`digitalSignature` on the leaf,
+    /// `keyCertSign` on each certificate authority).
+    #[error("certificate keyUsage is missing or lacks the required bit")]
+    MissingKeyUsage,
+
+    /// The leaf certificate's `extKeyUsage` extension was absent, or did
+    /// not contain `codeSigning` (1.3.6.1.5.5.7.3.3).
+    #[error("leaf certificate extKeyUsage does not contain codeSigning")]
+    MissingCodeSigningEku,
+
+    /// The leaf certificate carried a critical extension this crate does
+    /// not recognize. RFC 5280 SS4.2 requires rejecting certificates with
+    /// critical extensions a validator does not understand.
+    #[error("leaf certificate has an unrecognized critical extension")]
+    UnknownCriticalExtension,
+
+    /// An extension this crate models by OID appeared more than once on a
+    /// certificate.
+    #[error("certificate has a duplicate extension")]
+    DuplicateExtension,
+
+    /// The leaf certificate carried no embedded SCT (Signed Certificate
+    /// Timestamp) list extension, or the list was empty.
+    #[error("leaf certificate has no embedded SCT")]
+    SctMissing,
+
+    /// No embedded SCT verified against any trusted CT log key.
+    #[error("no embedded SCT verified against a trusted CT log key")]
+    SctInvalid,
+
+    /// An SCT's `logId` did not match any CT log in the trust store.
+    #[error("SCT logId does not match any trusted CT log")]
+    UnknownCtLog,
+
+    /// An SCT's `timestamp` fell outside its matched CT log key's
+    /// `validFor` window.
+    #[error("SCT timestamp is outside the trusted CT log key's validFor window")]
+    SctOutsideKeyValidity,
 }
 
 /// Transparency-log (Rekor) verification failures.

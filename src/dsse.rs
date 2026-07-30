@@ -155,7 +155,10 @@ impl LeafCertificateInfo {
 /// unix seconds. Saturates rather than panicking in the practically
 /// unreachable case of a duration past `i64::MAX` seconds — X.509 dates
 /// are bounded to the year 9999 or so, far below that.
-fn unix_seconds(d: std::time::Duration) -> i64 {
+///
+/// `pub(crate)`: also used by [`crate::x509`] for chain-validity checks
+/// on every certificate in a chain, not just the leaf.
+pub(crate) fn unix_seconds(d: std::time::Duration) -> i64 {
     i64::try_from(d.as_secs()).unwrap_or(i64::MAX)
 }
 

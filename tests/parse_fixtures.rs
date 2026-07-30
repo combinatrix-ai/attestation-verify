@@ -163,6 +163,9 @@ fn public_good_trust_root_parses() -> Result<(), Box<dyn std::error::Error>> {
     if !has_ed25519 {
         return Err("expected one tlog with keyDetails containing ED25519".into());
     }
+    if store.ctlogs.len() != 2 {
+        return Err(format!("expected 2 ctlogs, got {}", store.ctlogs.len()).into());
+    }
 
     Ok(())
 }
@@ -188,6 +191,9 @@ fn github_trust_root_parses() -> Result<(), Box<dyn std::error::Error>> {
             store.timestamp_authorities.len()
         )
         .into());
+    }
+    if !store.ctlogs.is_empty() {
+        return Err(format!("expected 0 ctlogs, got {}", store.ctlogs.len()).into());
     }
 
     Ok(())

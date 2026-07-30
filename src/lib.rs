@@ -35,12 +35,15 @@ pub mod trust;
 pub mod verifier;
 
 mod dsse;
+mod fulcio;
 mod limits;
 mod parse_util;
 mod rekor;
+mod sct;
 mod strict_json;
 mod subject;
 mod time;
+mod x509;
 
 pub use bundle::{
     AttestationEntry, BUNDLE_MEDIA_TYPE, Bundle, BundleSet, Certificate, Checkpoint, DsseEnvelope,
@@ -58,7 +61,7 @@ pub use policy::{
 pub use statement::{STATEMENT_TYPE, Statement, StatementSubject};
 pub use subject::Subject;
 pub use trust::{
-    CaSubject, CertificateAuthority, PublicKey, TRUSTED_ROOT_MEDIA_TYPE, TransparencyLog,
+    CaSubject, CertificateAuthority, CtLog, PublicKey, TRUSTED_ROOT_MEDIA_TYPE, TransparencyLog,
     TrustStore, ValidityPeriod,
 };
 pub use verifier::{
