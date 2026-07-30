@@ -6,6 +6,7 @@
 //! one JSON document per root; see `tests/fixtures/trusted-roots/`).
 
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 use crate::bundle::Certificate;
 use crate::error::{Error, ParseError, ResourceLimitError, UnsupportedError};
@@ -26,7 +27,14 @@ const EMBEDDED_PUBLIC_GOOD: &str = include_str!("../assets/trusted_root_public_g
 /// A parsed and structurally-hardened trusted-root document: the
 /// certificate authorities, transparency logs, and timestamp authorities a
 /// [`crate::Verifier`] may trust.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `PartialEq`/`Eq` are hand-implemented rather than derived: they compare
+/// only the parsed trust content (`media_type`, `tlogs`, `ctlogs`,
+/// `certificate_authorities`, `timestamp_authorities`), not the
+/// `fingerprint`/`source` provenance metadata below, so two trust stores
+/// loaded from byte-identical content are equal regardless of which
+/// constructor built them.
+#[derive(Debug, Clone)]
 pub struct TrustStore {
     /// Always [`TRUSTED_ROOT_MEDIA_TYPE`].
     pub media_type: String,
@@ -43,7 +51,30 @@ pub struct TrustStore {
     /// [`CertificateAuthority`] in the source format, modeled with the
     /// same type here.
     pub timestamp_authorities: Vec<CertificateAuthority>,
+    /// Lowercase-hex SHA-256 of the exact input JSON bytes this trust
+    /// store was parsed from, computed once at parse time. Reported in
+    /// every [`crate::verifier::VerificationReport`]
+    /// (`TrustSnapshotInfo`) so operators can tell exactly which trust-
+    /// root snapshot decided a result (DESIGN.md "Core decisions" item 3,
+    /// "Trust-root operations").
+    pub fingerprint: String,
+    /// Where this trust store was loaded from: `"embedded-public-good"`
+    /// for [`TrustStore::embedded_public_good`], `"external"` for a
+    /// caller-supplied [`TrustStore::from_json`].
+    pub source: String,
 }
+
+impl PartialEq for TrustStore {
+    fn eq(&self, other: &Self) -> bool {
+        self.media_type == other.media_type
+            && self.tlogs == other.tlogs
+            && self.ctlogs == other.ctlogs
+            && self.certificate_authorities == other.certificate_authorities
+            && self.timestamp_authorities == other.timestamp_authorities
+    }
+}
+
+impl Eq for TrustStore {}
 
 impl TrustStore {
     /// Parses a single trusted-root JSON document.
@@ -61,7 +92,8 @@ impl TrustStore {
         let value = strict_json::parse_strict(bytes)?;
         let raw: RawTrustedRoot =
             serde_json::from_value(value).map_err(|e| ParseError::Json(e.to_string()))?;
-        Self::from_raw(raw)
+        let fingerprint = hex::encode(Sha256::digest(bytes));
+        Self::from_raw(raw, fingerprint, "external".to_owned())
     }
 
     /// The embedded Sigstore public-good trusted root.
@@ -78,10 +110,12 @@ impl TrustStore {
     /// parse (would indicate a packaging bug in this crate, not a caller
     /// mistake).
     pub fn embedded_public_good() -> Result<Self, Error> {
-        Self::from_json(EMBEDDED_PUBLIC_GOOD.as_bytes())
+        let mut store = Self::from_json(EMBEDDED_PUBLIC_GOOD.as_bytes())?;
+        "embedded-public-good".clone_into(&mut store.source);
+        Ok(store)
     }
 
-    fn from_raw(raw: RawTrustedRoot) -> Result<Self, Error> {
+    fn from_raw(raw: RawTrustedRoot, fingerprint: String, source: String) -> Result<Self, Error> {
         let RawTrustedRoot {
             media_type,
             tlogs,
@@ -116,6 +150,8 @@ impl TrustStore {
             ctlogs,
             certificate_authorities,
             timestamp_authorities,
+            fingerprint,
+            source,
         })
     }
 }

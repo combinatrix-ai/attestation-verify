@@ -147,12 +147,6 @@ pub enum UnsupportedError {
         found: String,
     },
 
-    /// The verification chain is not implemented yet (this crate is a
-    /// parsing-only prototype). Every `Verifier::verify_*` call returns this
-    /// error after basic input parsing succeeds.
-    #[error("verification chain not implemented")]
-    ChainNotImplemented,
-
     /// A container (e.g. the GitHub attestations API response) had entries
     /// but none carried an inline bundle.
     #[error("no inline bundles in response (bundles must be fetched out of band)")]
@@ -174,6 +168,28 @@ pub enum UnsupportedError {
     StatementType {
         /// The `_type` string found in the input.
         found: String,
+    },
+
+    /// A signed statement's `predicateType` was not on this crate's
+    /// supported allow-list. v0.1 verifies exactly one predicate type
+    /// (`https://slsa.dev/provenance/v1`); GitHub's own release predicate
+    /// (`https://in-toto.io/attestation/release/v0.2`) and any other
+    /// predicate type are rejected here rather than verified and silently
+    /// misinterpreted.
+    #[error("unsupported predicate type: {found}")]
+    PredicateType {
+        /// The `predicateType` string found in the statement.
+        found: String,
+    },
+
+    /// A bundle carried more than one transparency-log entry. This crate's
+    /// verification chain checks exactly one; selecting among several
+    /// candidate entries is unimplemented (no real-world fixture has been
+    /// observed with more than one).
+    #[error("bundle has {count} tlog entries, expected exactly 1")]
+    MultipleTlogEntries {
+        /// The actual number of tlog entries found.
+        count: usize,
     },
 }
 
@@ -401,12 +417,127 @@ pub enum ContentBindingError {
 }
 
 /// The caller-supplied identity policy was not satisfied.
+///
+/// Matching (`crate::policy_match`) never infers what a mismatch might
+/// mean; every variant below names exactly which comparison failed, and
+/// (where applicable) carries the `expected` policy value alongside the
+/// `found` authenticated certificate value (DESIGN.md "Core decisions"
+/// item 8).
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum PolicyError {
     /// A policy builder was given an empty or malformed value.
     #[error("invalid policy configuration: {0}")]
     InvalidConfiguration(String),
+
+    /// A Fulcio identity claim needed to evaluate the policy was absent
+    /// from the certificate (its extension was not present).
+    #[error("certificate is missing the `{claim}` identity claim required to evaluate policy")]
+    MissingIdentityClaim {
+        /// The name of the missing claim (e.g. `"source_repository_uri"`).
+        claim: &'static str,
+    },
+
+    /// A Fulcio identity claim was present but not in the shape this crate
+    /// requires to evaluate policy (e.g. the source repository URI or the
+    /// SAN URI did not match the expected `https://github.com/...` shape).
+    #[error("certificate's `{claim}` identity claim is malformed: {reason}")]
+    MalformedIdentityClaim {
+        /// The name of the malformed claim.
+        claim: &'static str,
+        /// Human-readable reason the claim was rejected.
+        reason: String,
+    },
+
+    /// The certificate's authenticated OIDC issuer did not match the
+    /// pinned GitHub Actions issuer.
+    #[error("issuer mismatch: expected {expected}, found {found}")]
+    IssuerMismatch {
+        /// The pinned issuer this crate requires.
+        expected: String,
+        /// The issuer found in the certificate.
+        found: String,
+    },
+
+    /// The certificate's authenticated source repository (`owner/name`)
+    /// did not match the policy's required source repository.
+    #[error("source repository mismatch: expected {expected}, found {found}")]
+    SourceRepositoryMismatch {
+        /// The `owner/name` the policy requires.
+        expected: String,
+        /// The `owner/name` found in the certificate.
+        found: String,
+    },
+
+    /// The certificate's authenticated source repository owner id did not
+    /// match the policy's pinned owner id.
+    #[error("source repository owner id mismatch: expected {expected}, found {found}")]
+    SourceOwnerIdMismatch {
+        /// The decimal owner id the policy requires.
+        expected: String,
+        /// The decimal owner id found in the certificate.
+        found: String,
+    },
+
+    /// The certificate's authenticated source repository id did not match
+    /// the policy's pinned repository id.
+    #[error("source repository id mismatch: expected {expected}, found {found}")]
+    SourceRepositoryIdMismatch {
+        /// The decimal repository id the policy requires.
+        expected: String,
+        /// The decimal repository id found in the certificate.
+        found: String,
+    },
+
+    /// The certificate's authenticated source ref did not satisfy the
+    /// policy's ref requirement (`Exact` or `Glob`).
+    #[error("source ref mismatch: expected {expected}, found {found}")]
+    SourceRefMismatch {
+        /// The policy's required ref or ref-glob pattern.
+        expected: String,
+        /// The ref found in the certificate.
+        found: String,
+    },
+
+    /// The certificate's authenticated source commit did not match the
+    /// policy's required commit.
+    #[error("source commit mismatch: expected {expected}, found {found}")]
+    SourceCommitMismatch {
+        /// The commit sha (lowercase hex) the policy requires.
+        expected: String,
+        /// The commit sha found in the certificate.
+        found: String,
+    },
+
+    /// The certificate's authenticated signer-workflow repository
+    /// (`owner/name`) did not match the policy's required repository.
+    #[error("signer repository mismatch: expected {expected}, found {found}")]
+    SignerRepositoryMismatch {
+        /// The `owner/name` the policy requires.
+        expected: String,
+        /// The `owner/name` found in the certificate's SAN.
+        found: String,
+    },
+
+    /// The certificate's authenticated signer-workflow path did not match
+    /// the policy's required path.
+    #[error("signer workflow path mismatch: expected {expected}, found {found}")]
+    SignerWorkflowPathMismatch {
+        /// The workflow path the policy requires.
+        expected: String,
+        /// The workflow path found in the certificate's SAN.
+        found: String,
+    },
+
+    /// The certificate's authenticated signer-workflow revision did not
+    /// satisfy the policy's revision requirement (`Ref` or `Sha`).
+    #[error("signer workflow revision mismatch: expected {expected}, found {found}")]
+    SignerRevisionMismatch {
+        /// The ref or commit sha the policy requires.
+        expected: String,
+        /// The ref or digest found in the certificate.
+        found: String,
+    },
 }
 
 /// A hard resource limit (size, count, or depth) was exceeded. These limits

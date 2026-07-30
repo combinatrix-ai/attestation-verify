@@ -2,21 +2,16 @@
 //!
 //! Pure verification functions: PAE (pre-authentication encoding), leaf
 //! `SubjectPublicKeyInfo` extraction from the bundle's leaf certificate,
-//! and ECDSA envelope-signature verification. **Not wired into
-//! [`crate::Verifier`] yet** — see `DESIGN.md` "Testing strategy" and
-//! this module's unit tests for the coverage that does exist.
+//! and ECDSA envelope-signature verification — run as step 6 of
+//! [`crate::Verifier::verify_digest`]'s chain, after the leaf's X.509
+//! chain ([`crate::x509`]) has already validated.
 //!
-//! Only enough X.509 parsing happens here to extract the leaf
-//! certificate's `SubjectPublicKeyInfo` and `[notBefore, notAfter]`
-//! validity window (the latter needed by [`crate::rekor`]'s time-window
-//! check). Full certificate-chain / Fulcio-profile validation
-//! (`DESIGN.md` "X.509 / Fulcio validation profile") is a later task.
-
-// Not wired into `Verifier::verify_*` yet (this task's scope is pure
-// verification functions only, exercised by this module's own unit
-// tests) — matches the `#[allow(dead_code)]` precedent already used on
-// `Verifier`'s own not-yet-read fields in verifier.rs.
-#![allow(dead_code)]
+//! [`LeafCertificateInfo`] only extracts a leaf's `SubjectPublicKeyInfo`
+//! and `[notBefore, notAfter]` window directly from DER (used by
+//! [`crate::rekor`]'s time-window check, which runs before full chain
+//! validation); [`crate::x509::validate_chain`] is the actual
+//! certificate-chain / Fulcio-profile validation (`DESIGN.md` "X.509 /
+//! Fulcio validation profile").
 
 use der::{Decode, Encode};
 use signature::Verifier as _;
@@ -106,14 +101,21 @@ impl EcdsaVerifyingKey {
 }
 
 /// A leaf certificate's public key and validity window, extracted from
-/// its DER bytes.
+/// its DER bytes, independent of chain validation.
 ///
-/// Full certificate-chain / Fulcio-profile validation (`DESIGN.md` "X.509
-/// / Fulcio validation profile") is a later task; this only extracts what
-/// [`verify_envelope`] and [`crate::rekor`]'s time-window check need.
+/// [`crate::rekor`]'s time-window check (chain step 4) reads
+/// `not_before`/`not_after` directly from the leaf's own DER, since it
+/// runs *before* the chain is validated (chain step 5,
+/// [`crate::x509::validate_chain`]) — indeed its output (an authenticated
+/// integrated time) is what step 5 validates the chain *at*. Once the
+/// chain has validated, [`crate::verifier::Verifier::verify_digest`] uses
+/// the chain-validated [`crate::x509::ValidatedLeaf::leaf_spki_der`]
+/// instead of `key` below for DSSE verification, so `key` is exercised
+/// only by this module's own tests.
 #[derive(Debug, Clone)]
 pub(crate) struct LeafCertificateInfo {
     /// The certificate's subject public key.
+    #[allow(dead_code)] // exercised by this module's tests; see doc above.
     pub(crate) key: EcdsaVerifyingKey,
     /// `notBefore`, unix seconds.
     pub(crate) not_before: i64,

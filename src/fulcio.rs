@@ -17,11 +17,9 @@
 //! extension) but are outside `DESIGN.md`'s modeled set and tolerated as
 //! unknown, non-critical extensions.
 //!
-//! **Not wired into [`crate::Verifier`] yet** -- see this module's own
-//! unit tests for the coverage that does exist, matching the precedent
-//! set by [`crate::dsse`] and [`crate::rekor`].
-
-#![allow(dead_code)]
+//! Run as step 8 of [`crate::Verifier::verify_digest`]'s chain; the
+//! resulting [`FulcioClaims`] are matched against a caller's policy by
+//! [`crate::policy_match`] (step 9).
 
 use der::Decode;
 use der::asn1::{ObjectIdentifier, Utf8StringRef};

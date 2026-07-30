@@ -93,9 +93,23 @@ impl Statement {
     /// [`crate::Verifier`] for verification.
     #[must_use]
     pub fn contains_subject(&self, subject: &Subject) -> bool {
+        self.find_subject(subject).is_some()
+    }
+
+    /// Returns the first statement subject whose digest matches `subject`,
+    /// if any.
+    ///
+    /// Like [`Statement::contains_subject`], this is a pure data lookup
+    /// over signed-but-unverified content — it says the statement
+    /// *claims* this digest as a subject (and, if the claim carries one,
+    /// under this name), nothing about whether that claim has been
+    /// cryptographically verified. See [`crate::Verifier`] for
+    /// verification.
+    #[must_use]
+    pub fn find_subject(&self, subject: &Subject) -> Option<&StatementSubject> {
         self.subjects
             .iter()
-            .any(|s| s.sha256.as_ref() == Some(subject))
+            .find(|s| s.sha256.as_ref() == Some(subject))
     }
 }
 

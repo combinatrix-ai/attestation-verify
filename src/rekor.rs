@@ -1,9 +1,10 @@
 //! Rekor v1 transparency-log entry verification.
 //!
 //! Pure verification functions implementing `DESIGN.md` "Time-evidence
-//! model" steps 1-5. **Not wired into [`crate::Verifier`] yet.** Every
-//! check here is composable and independently unit-tested; see
-//! [`verify_tlog_entry`] for how they compose.
+//! model" steps 1-5, composed by [`verify_tlog_entry`] and run as step 4
+//! of [`crate::Verifier::verify_digest`]'s chain. Every check here is
+//! independently unit-tested; see [`verify_tlog_entry`] for how they
+//! compose.
 //!
 //! ## The canonicalized body
 //!
@@ -37,12 +38,6 @@
 //! 64-byte r||s) behind a 4-byte key hint this crate does not need to
 //! interpret: it already knows which trusted key to try, having selected
 //! the same one for the SET.
-
-// Not wired into `Verifier::verify_*` yet (this task's scope is pure
-// verification functions only, exercised by this module's own unit
-// tests) — matches the `#[allow(dead_code)]` precedent already used on
-// `Verifier`'s own not-yet-read fields in verifier.rs.
-#![allow(dead_code)]
 
 use sha2::{Digest, Sha256};
 
@@ -627,9 +622,11 @@ pub(crate) struct VerifiedTimestamp {
 /// # Errors
 ///
 /// Returns [`TransparencyError::NoTlogEntries`] if the bundle carries no
-/// transparency-log entries (this crate does not yet select among
-/// multiple), [`TransparencyError::InclusionProofMissing`] if the first
-/// entry lacks one, and otherwise whatever the first failing check among
+/// transparency-log entries, [`UnsupportedError::MultipleTlogEntries`] if
+/// it carries more than one (this crate verifies exactly one; selecting
+/// among several candidate entries is unimplemented),
+/// [`TransparencyError::InclusionProofMissing`] if the entry lacks one,
+/// and otherwise whatever the first failing check among
 /// [`parse_tlog_entry_body`], [`check_entry_binding`], [`select_log_key`],
 /// [`verify_set`], [`verify_inclusion_proof`], [`verify_checkpoint`], and
 /// [`check_time_window`] returns.
@@ -637,11 +634,16 @@ pub(crate) fn verify_tlog_entry(
     bundle: &Bundle,
     trust_store: &TrustStore,
 ) -> Result<VerifiedTimestamp, Error> {
-    let tlog_entry = bundle
-        .verification_material
-        .tlog_entries
-        .first()
-        .ok_or(Error::Transparency(TransparencyError::NoTlogEntries))?;
+    let tlog_entries = &bundle.verification_material.tlog_entries;
+    let tlog_entry = match tlog_entries.as_slice() {
+        [] => return Err(Error::Transparency(TransparencyError::NoTlogEntries)),
+        [entry] => entry,
+        entries => {
+            return Err(Error::Unsupported(UnsupportedError::MultipleTlogEntries {
+                count: entries.len(),
+            }));
+        }
+    };
     let leaf_certificate = &bundle.verification_material.certificate;
 
     // 1. Canonicalized body model + binding.
@@ -717,6 +719,7 @@ struct RawHash {
     // Kept only for faithful deserialization of the object shape; not
     // otherwise read (see module docs on why the algorithm string itself
     // isn't separately validated).
+    #[allow(dead_code)]
     algorithm: String,
     value: String,
 }

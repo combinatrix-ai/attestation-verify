@@ -37,11 +37,8 @@
 //! this module's positive test confirms this crate's reconstruction is
 //! byte-identical to that reference implementation's output.
 //!
-//! **Not wired into [`crate::Verifier`] yet** -- see this module's own
-//! unit tests for the coverage that does exist, matching the precedent
-//! set by [`crate::dsse`] and [`crate::rekor`].
-
-#![allow(dead_code)]
+//! Run as step 7 of [`crate::Verifier::verify_digest`]'s chain, after the
+//! leaf's X.509 chain ([`crate::x509`]) has already validated.
 
 use der::asn1::{AnyRef, OctetString};
 use der::{Decode, Encode, Tag, TagNumber, Tagged};

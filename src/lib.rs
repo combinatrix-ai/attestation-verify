@@ -3,17 +3,27 @@
 //!
 //! See `DESIGN.md` in the repository root for the full design.
 //!
-//! # Status: not yet usable for verification
+//! # Status: functional, narrow scope
 //!
-//! This crate currently implements crate scaffolding, the public API
-//! shape, the error taxonomy, and **hardened parsers** for the Sigstore
-//! bundle, in-toto statement, and trusted-root formats — with fixture
-//! tests against real-world data. **The cryptographic verification chain
-//! is not implemented.** Every [`Verifier::verify_digest`] /
-//! [`Verifier::verify_bytes`] call fails closed with
-//! [`UnsupportedError::ChainNotImplemented`]; there is no code path in
-//! this crate that reports a successful verification. Do not depend on
-//! this crate for actual attestation verification yet.
+//! This crate implements a complete offline verification chain — DSSE
+//! signature, Rekor v1 transparency-log inclusion (SET + Merkle proof +
+//! checkpoint), X.509/Fulcio chain validation, embedded SCT verification,
+//! and GitHub identity-policy matching — for one bundle shape:
+//! `actions/attest-build-provenance`-style bundles carrying a
+//! `https://slsa.dev/provenance/v1` predicate, verified against the
+//! embedded Sigstore public-good trust root or a caller-supplied one.
+//! [`Verifier::verify_digest`] / [`Verifier::verify_bytes`] report success
+//! only once every step of that chain has verified; there are no
+//! verification knobs, only identity policy (DESIGN.md "Core decisions"
+//! item 2).
+//!
+//! Out of scope for now (typed [`UnsupportedError`], never silently
+//! accepted): GitHub's own TSA-timestamped release-attestation flavor
+//! (`initiator: github`, no tlog entries), Rekor v2 (Ed25519,
+//! tiles/sharded logs), and any predicate type other than SLSA provenance
+//! v1. This crate has not been independently audited; see `README.md` for
+//! the exact verified scope and `DESIGN.md` for the full design and
+//! roadmap.
 //!
 //! # Layout
 //!
@@ -22,10 +32,10 @@
 //!   container shapes GitHub serves them in.
 //! - [`Statement`]: the in-toto statement inside a bundle's DSSE payload.
 //! - [`TrustStore`]: a parsed trusted-root document.
-//! - [`GithubPolicy`]: the identity policy a [`Verifier`] enforces (no
-//!   matching logic yet).
-//! - [`Verifier`]: the (fail-closed, not-yet-implemented) verification
-//!   entry point.
+//! - [`GithubPolicy`]: the identity policy a [`Verifier`] enforces.
+//! - [`Verifier`]: the verification entry point;
+//!   [`Verifier::verify_digest`] / [`Verifier::verify_bytes`] return a
+//!   [`verifier::VerificationReport`] on success.
 
 pub mod bundle;
 pub mod error;
@@ -38,6 +48,7 @@ mod dsse;
 mod fulcio;
 mod limits;
 mod parse_util;
+mod policy_match;
 mod rekor;
 mod sct;
 mod strict_json;

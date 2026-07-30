@@ -1,7 +1,7 @@
 # attestation-verify — Design
 
-Status: revision 2 — counterpart review (Codex/Sol lane) applied
-Date: 2026-07-29
+Status: revision 3 — verification chain implemented
+Date: 2026-07-30
 Owner: combinatrix-ai
 
 ## One-line
@@ -395,3 +395,8 @@ finalized at implementation.
   mechanical error taxonomy; trust-root operational commitments; budget
   restated (<60 target/<80 ceiling) with pinned metric; conformance +
   differential testing promoted to release gates; streaming and fetch cut.
+- r3 (2026-07-30): verification chain implemented end to end (identity-
+  policy matching + full orchestration in `Verifier::verify_digest`,
+  `ChainNotImplemented` removed) and passing against the real `cli/cli`
+  golden fixture; sigstore-conformance subset and differential-verification
+  gates (`scripts/differential.sh`, shipped but not run in CI) are next.

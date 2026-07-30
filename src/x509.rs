@@ -7,15 +7,9 @@
 //! pairing, name chaining, time windows, and the Fulcio leaf/CA
 //! certificate profile. [`crate::sct`] (SCT verification) and
 //! [`crate::fulcio`] (claims extraction) both consume this module's
-//! [`ValidatedLeaf`].
-//!
-//! **Not wired into [`crate::Verifier`] yet** -- see this module's own
-//! unit tests for the coverage that does exist, matching the precedent
-//! set by [`crate::dsse`] and [`crate::rekor`].
-
-// Not wired into `Verifier::verify_*` yet -- matches the `#[allow(dead_code)]`
-// precedent already used on `dsse`/`rekor`.
-#![allow(dead_code)]
+//! [`ValidatedLeaf`]. Run as step 5 of
+//! [`crate::Verifier::verify_digest`]'s chain, after the transparency-log
+//! entry ([`crate::rekor`]) has already authenticated a signing time.
 
 use der::asn1::ObjectIdentifier;
 use der::{Decode, Encode};
@@ -84,7 +78,12 @@ pub(crate) struct ValidatedLeaf {
     /// `issuer_key_hash` ([`crate::sct`]).
     pub(crate) issuer_spki_der: Vec<u8>,
     /// Number of trust-store certificates walked from the leaf's direct
-    /// issuer up to and including the root. For reporting only.
+    /// issuer up to and including the root. Not currently read by
+    /// [`crate::verifier`] (DESIGN.md's report shape does not call for
+    /// it) or by anything else outside this module's own tests, but kept
+    /// for diagnostics since it is already computed for free while
+    /// validating.
+    #[allow(dead_code)]
     pub(crate) chain_length: usize,
 }
 

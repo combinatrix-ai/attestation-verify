@@ -6,9 +6,9 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 use attestation_verify::{
-    BUNDLE_MEDIA_TYPE, Bundle, BundleSet, CommitSha, Error, GithubPolicy, ParseError, RefPolicy,
-    RepositoryIdentity, ResourceLimitError, SignerPolicy, SourcePolicy, Subject, TrustStore,
-    UnsupportedError, Verifier, WorkflowPath, WorkflowRevisionPolicy,
+    BUNDLE_MEDIA_TYPE, Bundle, BundleSet, ContentBindingError, Error, GithubPolicy, ParseError,
+    RefPolicy, RepositoryIdentity, ResourceLimitError, SignerPolicy, SourcePolicy, Subject,
+    TrustStore, UnsupportedError, Verifier, WorkflowPath, WorkflowRevisionPolicy,
 };
 
 fn fixture_path(relative: &str) -> std::path::PathBuf {
@@ -213,20 +213,24 @@ fn embedded_public_good_equals_fixture_file() -> Result<(), Box<dyn std::error::
 }
 
 // ---------------------------------------------------------------------
-// Verifier: fail-closed
+// Verifier: wiring sanity (the exhaustive positive/negative chain matrix
+// lives in tests/verify_e2e.rs; these two are a light smoke test that the
+// Verifier's public API and this fixture set actually plug together).
 // ---------------------------------------------------------------------
 
-fn valid_dlgt_policy() -> Result<GithubPolicy, Box<dyn std::error::Error>> {
+/// A policy that actually matches `github-cli/tarball-user-slsa-provenance.json`
+/// (real `cli/cli` v2.96.0 workflow-provenance fixture).
+fn matching_cli_cli_policy() -> Result<GithubPolicy, Box<dyn std::error::Error>> {
     let source = SourcePolicy {
-        repository: RepositoryIdentity::parse("combinatrix-ai/dlgt")?
-            .with_owner_id(1)
-            .with_repository_id(2),
-        git_ref: RefPolicy::Exact("refs/tags/v0.4.0".to_owned()),
-        commit: Some(CommitSha::new(&"a".repeat(40))?),
+        repository: RepositoryIdentity::parse("cli/cli")?
+            .with_owner_id(59_704_711)
+            .with_repository_id(212_613_049),
+        git_ref: RefPolicy::Exact("refs/heads/trunk".to_owned()),
+        commit: None,
     };
     let signer = SignerPolicy {
-        repository: RepositoryIdentity::parse("combinatrix-ai/dlgt")?,
-        path: WorkflowPath::new(".github/workflows/release.yml")?,
+        repository: RepositoryIdentity::parse("cli/cli")?,
+        path: WorkflowPath::new(".github/workflows/deployment.yml")?,
         revision: WorkflowRevisionPolicy::Any,
     };
     Ok(GithubPolicy::builder()
@@ -236,10 +240,11 @@ fn valid_dlgt_policy() -> Result<GithubPolicy, Box<dyn std::error::Error>> {
 }
 
 #[test]
-fn verifier_fails_closed_on_real_digest_and_bundle() -> Result<(), Box<dyn std::error::Error>> {
+fn verifier_succeeds_on_real_bundle_with_matching_policy() -> Result<(), Box<dyn std::error::Error>>
+{
     let verifier = Verifier::builder()
         .trust_store(TrustStore::embedded_public_good()?)
-        .github_policy(valid_dlgt_policy()?)
+        .github_policy(matching_cli_cli_policy()?)
         .build()?;
 
     let bundle = Bundle::from_json(&read_fixture(
@@ -247,20 +252,28 @@ fn verifier_fails_closed_on_real_digest_and_bundle() -> Result<(), Box<dyn std::
     )?)?;
     let digest = read_fixture_digest("github-cli/gh_2.96.0_linux_amd64.tar.gz.sha256")?;
 
-    match verifier.verify_digest(&digest, &bundle) {
-        Err(Error::Unsupported(UnsupportedError::ChainNotImplemented)) => Ok(()),
-        other => Err(format!(
-            "expected ChainNotImplemented (the crate cannot yet report success), got {other:?}"
+    let report = verifier.verify_digest(&digest, &bundle)?;
+    if report.signer.source_repository != "cli/cli" {
+        return Err(format!(
+            "unexpected source_repository: {}",
+            report.signer.source_repository
         )
-        .into()),
+        .into());
     }
+    // Exhaustive field-by-field assertions live in tests/verify_e2e.rs.
+    Ok(())
 }
 
 #[test]
-fn verifier_fails_closed_via_verify_bytes_too() -> Result<(), Box<dyn std::error::Error>> {
+fn verify_bytes_fails_closed_when_hashed_artifact_is_not_a_subject()
+-> Result<(), Box<dyn std::error::Error>> {
+    // `gh_2.96.0_checksums.txt` is not among
+    // `tarball-user-slsa-provenance.json`'s 21 subjects (confirmed by
+    // `tarball_user_slsa_provenance_parses` above), regardless of policy:
+    // `verify_bytes` must still fail closed on subject binding.
     let verifier = Verifier::builder()
         .trust_store(TrustStore::embedded_public_good()?)
-        .github_policy(valid_dlgt_policy()?)
+        .github_policy(matching_cli_cli_policy()?)
         .build()?;
 
     let bundle = Bundle::from_json(&read_fixture(
@@ -269,8 +282,8 @@ fn verifier_fails_closed_via_verify_bytes_too() -> Result<(), Box<dyn std::error
     let checksums_bytes = read_fixture("github-cli/gh_2.96.0_checksums.txt")?;
 
     match verifier.verify_bytes(&checksums_bytes, &bundle) {
-        Err(Error::Unsupported(UnsupportedError::ChainNotImplemented)) => Ok(()),
-        other => Err(format!("expected ChainNotImplemented, got {other:?}").into()),
+        Err(Error::ContentBinding(ContentBindingError::SubjectNotFound)) => Ok(()),
+        other => Err(format!("expected ContentBinding(SubjectNotFound), got {other:?}").into()),
     }
 }
 
