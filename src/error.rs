@@ -126,6 +126,13 @@ pub enum ParseError {
         /// Human-readable reason the timestamp was rejected.
         reason: String,
     },
+
+    /// A Rekor checkpoint (signed note) envelope did not match the
+    /// expected line structure: `<origin>\n<treeSize>\n<rootHash>\n`,
+    /// optional extension lines, a blank line, then one or more `— <name>
+    /// <base64>` signature lines.
+    #[error("malformed checkpoint envelope: {0}")]
+    Checkpoint(String),
 }
 
 /// The input is well-formed but uses a format, version, or shape this crate
@@ -191,15 +198,62 @@ pub enum CertificateError {
     /// The certificate could not be parsed as DER.
     #[error("certificate is not valid DER: {0}")]
     InvalidDer(String),
+
+    /// A `SubjectPublicKeyInfo` (from a leaf certificate or a trust-store
+    /// key) used a key algorithm/curve this crate does not implement.
+    /// Only P-256 and P-384 ECDSA are supported.
+    #[error("unsupported public key algorithm")]
+    UnsupportedKeyAlgorithm,
 }
 
 /// Transparency-log (Rekor) verification failures.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum TransparencyError {
-    /// The Merkle inclusion proof did not verify against the checkpoint.
+    /// The Merkle inclusion proof did not verify against the checkpoint,
+    /// or the proof's `logIndex`/`treeSize`/hash count were inconsistent
+    /// (including over- or under-length hash lists).
     #[error("inclusion proof did not verify")]
     InclusionProofInvalid,
+
+    /// The bundle carried no transparency-log entries to verify.
+    #[error("bundle has no transparency-log entries")]
+    NoTlogEntries,
+
+    /// No key in the trust store's transparency logs had a SHA-256 digest
+    /// of its `SubjectPublicKeyInfo` matching the entry's `logId.keyId`.
+    #[error("no trusted log key matches this entry's logId")]
+    UnknownLogKey,
+
+    /// The tlog entry carried no inclusion promise (SET). A SET is
+    /// required: an inclusion proof alone does not authenticate
+    /// `integratedTime` (DESIGN.md "Time-evidence model").
+    #[error("tlog entry has no inclusion promise (SET)")]
+    SetMissing,
+
+    /// The inclusion promise (SET) did not verify against the selected
+    /// trusted log key.
+    #[error("inclusion promise (SET) did not verify")]
+    SetInvalid,
+
+    /// The tlog entry carried no Merkle inclusion proof.
+    #[error("tlog entry has no inclusion proof")]
+    InclusionProofMissing,
+
+    /// The checkpoint's tree size did not match the inclusion proof's
+    /// tree size.
+    #[error("checkpoint treeSize does not match the inclusion proof's treeSize")]
+    CheckpointTreeSizeMismatch,
+
+    /// The checkpoint's root hash did not match the inclusion proof's
+    /// root hash.
+    #[error("checkpoint rootHash does not match the inclusion proof's rootHash")]
+    CheckpointRootHashMismatch,
+
+    /// No signature line in the checkpoint verified against the selected
+    /// trusted log key.
+    #[error("no checkpoint signature verified with the trusted log key")]
+    CheckpointSignatureInvalid,
 }
 
 /// RFC 3161 timestamp verification failures.
@@ -209,6 +263,16 @@ pub enum TimestampError {
     /// The RFC 3161 timestamp token did not parse or verify.
     #[error("rfc3161 timestamp invalid")]
     Invalid,
+
+    /// The authenticated `integratedTime` fell outside the selected
+    /// trusted log key's `validFor` window.
+    #[error("integratedTime is outside the trusted log key's validity window")]
+    IntegratedTimeOutsideLogKeyValidity,
+
+    /// The authenticated `integratedTime` fell outside the leaf
+    /// certificate's `[notBefore, notAfter]` validity window.
+    #[error("integratedTime is outside the leaf certificate's validity window")]
+    IntegratedTimeOutsideCertificateValidity,
 }
 
 /// The signed content did not bind to the requested subject.
@@ -219,6 +283,37 @@ pub enum ContentBindingError {
     /// subjects.
     #[error("subject digest not found in statement")]
     SubjectNotFound,
+
+    /// A DSSE envelope's signature did not verify against the leaf
+    /// certificate's public key over the PAE-encoded payload.
+    #[error("dsse envelope signature did not verify")]
+    DsseSignatureInvalid,
+
+    /// The Rekor entry's own `kind`/`apiVersion` (inside the
+    /// canonicalized body) did not match the bundle's `kindVersion`
+    /// metadata for the same tlog entry.
+    #[error("tlog entry kindVersion does not match the canonicalized body's kind/apiVersion")]
+    TlogEntryKindVersionMismatch,
+
+    /// The Rekor entry's recorded signature did not match the bundle's
+    /// DSSE signature.
+    #[error("tlog entry signature does not match the bundle's DSSE signature")]
+    TlogEntrySignatureMismatch,
+
+    /// The Rekor entry's recorded verifier certificate did not match the
+    /// bundle's leaf certificate.
+    #[error("tlog entry verifier certificate does not match the bundle's leaf certificate")]
+    TlogEntryCertificateMismatch,
+
+    /// The Rekor entry's recorded payload hash did not match the SHA-256
+    /// of the bundle's decoded DSSE payload.
+    #[error("tlog entry payloadHash does not match the bundle's DSSE payload")]
+    TlogEntryPayloadHashMismatch,
+
+    /// The Rekor entry's recorded envelope hash did not match this
+    /// crate's recomputation of it from the bundle's DSSE envelope.
+    #[error("tlog entry envelopeHash does not match the bundle's DSSE envelope")]
+    TlogEntryEnvelopeHashMismatch,
 }
 
 /// The caller-supplied identity policy was not satisfied.

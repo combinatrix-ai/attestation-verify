@@ -34,8 +34,10 @@ pub mod statement;
 pub mod trust;
 pub mod verifier;
 
+mod dsse;
 mod limits;
 mod parse_util;
+mod rekor;
 mod strict_json;
 mod subject;
 mod time;

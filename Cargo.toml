@@ -11,11 +11,18 @@ publish = false
 
 [dependencies]
 base64 = "0.23.0"
+der = "0.8.1"
+ecdsa = { version = "0.17.0", features = ["der"] }
 hex = "0.4.3"
+p256 = { version = "0.14.0", default-features = false, features = ["ecdsa", "pkcs8", "alloc"] }
+p384 = { version = "0.14.0", default-features = false, features = ["ecdsa", "pkcs8", "alloc"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.11.0"
+signature = "3.0.0"
+spki = "0.8.0"
 thiserror = "2.0.19"
+x509-cert = { version = "0.3.0", default-features = false }
 
 # Integration tests (tests/) compile as a separate crate and only see the
 # library's public API plus [dev-dependencies] — not its own [dependencies]

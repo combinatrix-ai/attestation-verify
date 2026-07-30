@@ -45,6 +45,34 @@ pub(crate) fn strict_stringified_u64(field: &'static str, s: &str) -> Result<u64
     })
 }
 
+/// Decodes `s` as a single PEM block labeled `label` (e.g. `"CERTIFICATE"`
+/// for `-----BEGIN CERTIFICATE-----` / `-----END CERTIFICATE-----`),
+/// returning the decoded DER bytes.
+///
+/// Strict: `s` (after trimming only leading/trailing whitespace) must
+/// start with the exact begin marker and end with the exact end marker;
+/// everything between them is treated as the base64 body (PEM line-wraps
+/// it, so internal whitespace is stripped before decoding with the same
+/// strict engine as [`strict_base64`]).
+pub(crate) fn strict_pem(field: &'static str, label: &str, s: &str) -> Result<Vec<u8>, ParseError> {
+    let begin = format!("-----BEGIN {label}-----");
+    let end = format!("-----END {label}-----");
+    let trimmed = s.trim();
+    let body = trimmed
+        .strip_prefix(begin.as_str())
+        .ok_or_else(|| ParseError::Base64 {
+            field,
+            reason: format!("missing \"{begin}\" marker"),
+        })?
+        .strip_suffix(end.as_str())
+        .ok_or_else(|| ParseError::Base64 {
+            field,
+            reason: format!("missing \"{end}\" marker"),
+        })?;
+    let compact: String = body.chars().filter(|c| !c.is_whitespace()).collect();
+    strict_base64(field, &compact)
+}
+
 /// Rejects `bytes` if it exceeds the crate-wide maximum input size. Must be
 /// the first check performed by every `from_json` / `from_json_lines` /
 /// `from_github_response` entry point, before any parsing work.
