@@ -1,7 +1,7 @@
 # attestation-verify — Design
 
-Status: revision 3 — verification chain implemented
-Date: 2026-07-30
+Status: revision 4 — verification chain and conformance gate implemented
+Date: 2026-07-31
 Owner: combinatrix-ai
 
 ## One-line
@@ -400,3 +400,7 @@ finalized at implementation.
   `ChainNotImplemented` removed) and passing against the real `cli/cli`
   golden fixture; sigstore-conformance subset and differential-verification
   gates (`scripts/differential.sh`, shipped but not run in CI) are next.
+- r4 (2026-07-31): added the dependency-free verification-only
+  sigstore-conformance client and PR release gate; recorded the strict
+  expected-failure manifest for signing, managed-key, legacy/hashedrekord,
+  Rekor v2/TSA, and non-GitHub scope boundaries.

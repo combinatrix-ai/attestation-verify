@@ -79,6 +79,45 @@ silently accepted)
 See [DESIGN.md](DESIGN.md) for the full design, the normative
 time-evidence model, and the roadmap.
 
+## Sigstore conformance gate
+
+CI builds a dependency-free `conformance` binary and runs the official
+[sigstore-conformance Action](https://github.com/sigstore/sigstore-conformance)
+on pull requests. It covers the suite's bundle verification flow for
+certificate identities, custom trusted roots, artifact paths, and
+`sha256:<digest>` inputs. The binary maps a GitHub workflow identity URI onto
+`GithubPolicy` and pins the OIDC issuer to
+`https://token.actions.githubusercontent.com`.
+
+This is an honest verification subset. Signing is disabled with the Action's
+`skip-signing` input because signing is a v0.1 non-goal. Managed-key
+(`--key`) verification, staging, hashedrekord entries, legacy bundle versions,
+Rekor v2/TSA fixtures, and non-GitHub identities return non-zero with an
+explicit unsupported message. The current expected-failure list, with one
+scope annotation per test node, is
+[`tests/conformance-expected-failures.txt`](tests/conformance-expected-failures.txt).
+The Action's strict xfail behavior makes both an unexpected failure and an
+unexpected pass fail CI. The upstream CPython-release aggregate is skipped
+because its Google/OIDC identities are outside this crate's GitHub-only scope.
+
+To run the same static subset locally:
+
+```sh
+crate_dir="$(pwd)"
+suite_dir="$(mktemp -d /tmp/attestation-verify-conformance.XXXXXX)"
+git clone --depth=1 https://github.com/sigstore/sigstore-conformance.git "$suite_dir"
+uv venv "$suite_dir/.venv"
+uv pip install --python "$suite_dir/.venv/bin/python" \
+    --requirement "$suite_dir/requirements.txt"
+cargo build --locked --release --bin conformance
+xfail="$(awk -F '\t' '!/^[[:space:]]*#/ && NF >= 2 { print $1 }' \
+    tests/conformance-expected-failures.txt | paste -sd ' ' -)"
+GHA_SIGSTORE_CONFORMANCE_SKIP_CPYTHON_RELEASE_TESTS=true \
+GHA_SIGSTORE_CONFORMANCE_XFAIL="$xfail" \
+    "$suite_dir/.venv/bin/python" -m pytest -q "$suite_dir/test" \
+    --entrypoint "$crate_dir/target/release/conformance" --skip-signing
+```
+
 ## Development
 
 The minimum supported Rust version is 1.88. Run the same checks as CI from

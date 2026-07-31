@@ -175,3 +175,51 @@ jobs:
 
       - name: Check examples with MSRV
         run: cargo check --locked --examples
+
+  conformance:
+    name: Sigstore client conformance (verification subset)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry and target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build conformance client
+        run: cargo build --locked --release --bin conformance
+
+      - name: Validate expected-failure manifest
+        id: conformance-xfails
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest="tests/conformance-expected-failures.txt"
+          patterns_file="${RUNNER_TEMP}/conformance-xfail-patterns"
+          awk -F '\t' '
+            /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
+            NF < 2 {
+              printf "malformed expected-failure entry at line %d\n", NR > "/dev/stderr"
+              exit 1
+            }
+            $1 in seen {
+              printf "duplicate expected-failure entry %q at line %d\n", $1, NR > "/dev/stderr"
+              exit 1
+            }
+            { seen[$1] = 1; print $1 }
+          ' "${manifest}" > "${patterns_file}"
+          test -s "${patterns_file}"
+          printf 'patterns=%s\n' "$(paste -sd ' ' "${patterns_file}")" >> "${GITHUB_OUTPUT}"
+
+      # Pinned to sigstore-conformance main at the source revision inspected
+      # for this gate: f12aa02f4a6e5a9e84bcc3c10c193b14ab04da9d.
+      - name: Run official Sigstore conformance suite
+        uses: sigstore/sigstore-conformance@f12aa02f4a6e5a9e84bcc3c10c193b14ab04da9d
+        with:
+          entrypoint: ${{ github.workspace }}/target/release/conformance
+          skip-signing: true
+          skip-cpython-release-tests: true
+          xfail: ${{ steps.conformance-xfails.outputs.patterns }}
