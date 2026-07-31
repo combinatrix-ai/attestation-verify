@@ -1,0 +1,32 @@
+name: Differential verification
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 3 * * 0'
+
+permissions:
+  contents: read
+  attestations: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  differential:
+    name: Verify parity with gh attestation verify
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry and target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run differential verification gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./scripts/differential.sh

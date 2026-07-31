@@ -1,5 +1,7 @@
 # attestation-verify
 
+[![CI](https://github.com/combinatrix-ai/attestation-verify/actions/workflows/ci.yml/badge.svg)](https://github.com/combinatrix-ai/attestation-verify/actions/workflows/ci.yml)
+
 Verify GitHub Artifact Attestations (Sigstore bundles) offline in Rust —
 minimal dependencies, sans-io, fail-closed.
 
@@ -76,6 +78,33 @@ silently accepted)
 
 See [DESIGN.md](DESIGN.md) for the full design, the normative
 time-evidence model, and the roadmap.
+
+## Development
+
+The minimum supported Rust version is 1.88. Run the same checks as CI from
+the repository root:
+
+```sh
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
+cargo test --locked
+```
+
+The dependency budget counts unique `(name, version)` pairs in the default
+feature set's normal+build dependencies, excluding dev-dependencies. The
+target is below 60 and the hard ceiling is 80. Measure the current count with:
+
+```sh
+scripts/dep-budget.sh
+```
+
+The script measures the canonical `x86_64-unknown-linux-gnu` target used by
+CI; set `DEP_BUDGET_TARGET` to inspect another supported target.
+
+The weekly/manual differential gate runs `scripts/differential.sh` against a
+real `cli/cli` release and its tampered copy. It requires an authenticated
+`gh` CLI and network access, so it is not part of the local unit-test suite.
 
 ## Disclaimer
 

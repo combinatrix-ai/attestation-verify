@@ -2,6 +2,7 @@
 name = "attestation-verify"
 version = "0.0.1"
 edition = "2024"
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 description = "Verify GitHub Artifact Attestations (Sigstore bundles) offline - minimal, sans-io, fail-closed"
 repository = "https://github.com/combinatrix-ai/attestation-verify"
