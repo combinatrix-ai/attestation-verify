@@ -193,13 +193,13 @@ fn reject_unsupported_bundle_shape(bytes: &[u8]) -> Result<(), Box<dyn StdError>
         );
     }
 
-    if let Some(media_type) = value.get("mediaType").and_then(serde_json::Value::as_str) {
-        if media_type != BUNDLE_MEDIA_TYPE {
-            return Err(format!(
-                "unsupported: bundle media type {media_type:?}; this crate accepts {BUNDLE_MEDIA_TYPE:?} only"
-            )
-            .into());
-        }
+    if let Some(media_type) = value.get("mediaType").and_then(serde_json::Value::as_str)
+        && media_type != BUNDLE_MEDIA_TYPE
+    {
+        return Err(format!(
+            "unsupported: bundle media type {media_type:?}; this crate accepts {BUNDLE_MEDIA_TYPE:?} only"
+        )
+        .into());
     }
 
     Ok(())
