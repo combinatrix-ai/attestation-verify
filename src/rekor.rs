@@ -432,7 +432,7 @@ pub(crate) fn verify_inclusion_proof(
 const CHECKPOINT_SIGNATURE_PREFIX: &str = "\u{2014} ";
 
 /// A parsed checkpoint (signed note) envelope.
-struct ParsedCheckpoint<'a> {
+pub(crate) struct ParsedCheckpoint<'a> {
     tree_size: u64,
     root_hash: Vec<u8>,
     /// The note body: `<origin>\n<treeSize>\n<rootHash>\n` plus any
@@ -446,7 +446,7 @@ struct ParsedCheckpoint<'a> {
     signatures: Vec<(&'a str, Vec<u8>)>,
 }
 
-fn parse_checkpoint(envelope: &str) -> Result<ParsedCheckpoint<'_>, Error> {
+pub(crate) fn parse_checkpoint(envelope: &str) -> Result<ParsedCheckpoint<'_>, Error> {
     let malformed = |reason: &str| Error::Parse(ParseError::Checkpoint(reason.to_owned()));
 
     let blank_line_at = envelope

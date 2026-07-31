@@ -1,1 +1,35 @@
 target/
+
+# cargo-fuzz build output and crash/coverage artifacts.
+/fuzz/target/
+/fuzz/artifacts/
+/fuzz/coverage/
+/fuzz/corpus/**/crash-*
+/fuzz/corpus/**/leak-*
+/fuzz/corpus/**/timeout-*
+/fuzz/corpus/**/oom-*
+
+# Keep only the named, fixture-derived seeds in version control. libFuzzer
+# writes newly interesting corpus entries alongside them during local runs.
+/fuzz/corpus/bundle/*
+!/fuzz/corpus/bundle/golden.json
+!/fuzz/corpus/bundle/tsa.json
+/fuzz/corpus/jsonl/*
+!/fuzz/corpus/jsonl/checksums-gh-download.jsonl
+/fuzz/corpus/github_api/*
+!/fuzz/corpus/github_api/redacted.json
+!/fuzz/corpus/github_api/inline-tsa.json
+/fuzz/corpus/statement/*
+!/fuzz/corpus/statement/golden.json
+!/fuzz/corpus/statement/tsa.json
+/fuzz/corpus/trusted_root/*
+!/fuzz/corpus/trusted_root/public-good.json
+!/fuzz/corpus/trusted_root/github.json
+/fuzz/corpus/rekor_body/*
+!/fuzz/corpus/rekor_body/golden-body.json
+/fuzz/corpus/checkpoint/*
+!/fuzz/corpus/checkpoint/golden-envelope.txt
+/fuzz/corpus/sct/*
+!/fuzz/corpus/sct/golden-list.bin
+/fuzz/corpus/rfc3339/*
+!/fuzz/corpus/rfc3339/fixture-*

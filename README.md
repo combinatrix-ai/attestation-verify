@@ -141,6 +141,35 @@ scripts/dep-budget.sh
 The script measures the canonical `x86_64-unknown-linux-gnu` target used by
 CI; set `DEP_BUDGET_TARGET` to inspect another supported target.
 
+### Parser fuzzing
+
+The fixture-seeded cargo-fuzz crate is a separate workspace under `fuzz/`, so
+its nightly-only `libfuzzer-sys` dependency is not part of the library's
+dependency budget or MSRV build. Install the tools and regenerate the checked-
+in seeds with:
+
+```sh
+rustup toolchain install nightly
+cargo +nightly install cargo-fuzz --locked
+python3 fuzz/scripts/generate_corpora.py
+```
+
+Seeds live in `fuzz/corpus/<target>/` and are derived from committed files in
+`tests/fixtures/`. Run one target locally, for example:
+
+```sh
+cargo +nightly fuzz run bundle -- -max_total_time=180
+```
+
+The targets are `bundle`, `jsonl`, `github_api`, `statement`, `trusted_root`,
+`rekor_body`, `checkpoint`, `sct`, and `rfc3339`. Crash and sanitizer outputs
+are written under `fuzz/artifacts/`; preserve and minimize any input there
+before reporting a failure. The pull-request CI smoke job runs every target
+for the single workflow constant `FUZZ_SMOKE_SECONDS` (currently 60 seconds).
+That catches reproducible crashes and panics within those bounded runs; it is
+not a coverage claim, an exhaustive parser proof, or a replacement for the
+unit, fixture, and differential tests.
+
 The weekly/manual differential gate runs `scripts/differential.sh` against a
 real `cli/cli` release and its tampered copy. It requires an authenticated
 `gh` CLI and network access, so it is not part of the local unit-test suite.

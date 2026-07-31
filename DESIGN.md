@@ -404,3 +404,6 @@ finalized at implementation.
   sigstore-conformance client and PR release gate; recorded the strict
   expected-failure manifest for signing, managed-key, legacy/hashedrekord,
   Rekor v2/TSA, and non-GitHub scope boundaries.
+- r5 (2026-07-31): fixture-seeded cargo-fuzz targets and a bounded pull-request
+  smoke job added for every security-sensitive parser; fuzz build output is
+  isolated from the library workspace and dependency budget.

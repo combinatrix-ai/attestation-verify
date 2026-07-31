@@ -10,6 +10,12 @@ keywords = ["github", "attestation", "sigstore", "slsa", "supply-chain"]
 categories = ["cryptography", "authentication"]
 publish = false
 
+[features]
+# Enables the separate cargo-fuzz crate's typed adapters for parser routines
+# that are intentionally crate-private in the normal library API. This
+# feature adds no dependencies and is not part of the default build.
+fuzzing = []
+
 [dependencies]
 base64 = "0.23.0"
 der = "0.8.1"
