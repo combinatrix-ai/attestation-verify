@@ -400,3 +400,6 @@ finalized at implementation.
   `ChainNotImplemented` removed) and passing against the real `cli/cli`
   golden fixture; sigstore-conformance subset and differential-verification
   gates (`scripts/differential.sh`, shipped but not run in CI) are next.
+- r4 (2026-07-31): fixture-seeded cargo-fuzz targets and a bounded pull-request
+  smoke job added for every security-sensitive parser; fuzz build output is
+  isolated from the library workspace and dependency budget.

@@ -175,3 +175,53 @@ jobs:
 
       - name: Check examples with MSRV
         run: cargo check --locked --examples
+
+  fuzz:
+    name: Parser fuzz smoke
+    runs-on: ubuntu-latest
+    env:
+      # Keep the complete CI budget in one obvious place so it can be raised
+      # without changing the target loop below.
+      FUZZ_SMOKE_SECONDS: "60"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up nightly Rust
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache Cargo registry and fuzz target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz -> fuzz/target
+          key: fuzz-nightly
+
+      - name: Install cargo-fuzz
+        run: cargo +nightly install cargo-fuzz --locked
+
+      - name: Verify fixture-derived corpora are current
+        run: |
+          set -euo pipefail
+          python3 fuzz/scripts/generate_corpora.py
+          git diff --exit-code -- fuzz/corpus
+
+      - name: Run bounded smoke fuzzing for every parser target
+        run: |
+          set -euo pipefail
+          targets=(
+            bundle
+            jsonl
+            github_api
+            statement
+            trusted_root
+            rekor_body
+            checkpoint
+            sct
+            rfc3339
+          )
+          for target in "${targets[@]}"; do
+            echo "Running ${target} for ${FUZZ_SMOKE_SECONDS}s"
+            cargo +nightly fuzz run "${target}" -- \
+              -max_total_time="${FUZZ_SMOKE_SECONDS}" \
+              -print_final_stats=1
+          done

@@ -1,0 +1,77 @@
+[package]
+name = "attestation-verify-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+attestation-verify = { path = "..", features = ["fuzzing"] }
+libfuzzer-sys = "0.4"
+
+[[bin]]
+name = "bundle"
+path = "fuzz_targets/bundle.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jsonl"
+path = "fuzz_targets/jsonl.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "github_api"
+path = "fuzz_targets/github_api.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "statement"
+path = "fuzz_targets/statement.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "trusted_root"
+path = "fuzz_targets/trusted_root.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rekor_body"
+path = "fuzz_targets/rekor_body.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "checkpoint"
+path = "fuzz_targets/checkpoint.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sct"
+path = "fuzz_targets/sct.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rfc3339"
+path = "fuzz_targets/rfc3339.rs"
+test = false
+doc = false
+bench = false

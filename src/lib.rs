@@ -56,6 +56,10 @@ mod subject;
 mod time;
 mod x509;
 
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub mod fuzzing;
+
 pub use bundle::{
     AttestationEntry, BUNDLE_MEDIA_TYPE, Bundle, BundleSet, Certificate, Checkpoint, DsseEnvelope,
     DsseSignature, InclusionPromise, InclusionProof, Rfc3161Timestamp, TimestampVerificationData,
