@@ -17,15 +17,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up stable Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master, as of 2026-08-02
         with:
+          toolchain: stable
           components: clippy, rustfmt
 
       - name: Cache Cargo registry and target
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2, as of 2026-08-02
 
       - name: Check formatting
         run: cargo fmt --check
@@ -52,13 +53,15 @@ jobs:
           - macos-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up stable Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master, as of 2026-08-02
+        with:
+          toolchain: stable
 
       - name: Cache Cargo registry and target
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2, as of 2026-08-02
 
       - name: Run native cryptographic fixture tests
         run: cargo test --locked
@@ -91,15 +94,16 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up stable Rust for ${{ matrix.target }}
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master, as of 2026-08-02
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
 
       - name: Cache Cargo registry and target
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2, as of 2026-08-02
         with:
           key: cross-${{ matrix.target }}
 
@@ -108,6 +112,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          zig_version=0.15.2
           zig_arch="$(case "$(uname -m)" in
             x86_64|amd64) echo x86_64 ;;
             aarch64|arm64) echo aarch64 ;;
@@ -118,14 +123,36 @@ jobs:
             Darwin) echo macos ;;
             *) echo "unsupported runner OS: $(uname -s)" >&2; exit 1 ;;
           esac)"
+          # Checksums as published by ziglang.org for 0.15.2, recorded here on
+          # purpose: a checksum fetched from the same host as the tarball would
+          # move with it and prove nothing. Committing the value is what makes
+          # a substituted tarball detectable. Unlisted platforms fail closed.
+          zig_sha256="$(case "${zig_arch}-${zig_os}" in
+            x86_64-linux) echo 02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239 ;;
+            aarch64-linux) echo 958ed7d1e00d0ea76590d27666efbf7a932281b3d7ba0c6b01b0ff26498f667f ;;
+            x86_64-macos) echo 375b6909fc1495d16fc2c7db9538f707456bfc3373b14ee83fdd3e22b3d43f7f ;;
+            aarch64-macos) echo 3cc2bab367e185cdfb27501c4b30b1b0653c28d9f73df8dc91488e66ece5fa6b ;;
+            *) echo "no recorded Zig checksum for ${zig_arch}-${zig_os}" >&2; exit 1 ;;
+          esac)"
+          zig_dir="zig-${zig_arch}-${zig_os}-${zig_version}"
+          tarball="${RUNNER_TEMP}/${zig_dir}.tar.xz"
+          # Download to a file rather than piping into tar: the previous
+          # `curl | tar -xJ` had already extracted the archive by the time
+          # anything could have checked it.
           curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
-            "https://ziglang.org/download/0.15.2/zig-${zig_arch}-${zig_os}-0.15.2.tar.xz" \
-            | tar -xJ -C "${RUNNER_TEMP}"
-          echo "${RUNNER_TEMP}/zig-${zig_arch}-${zig_os}-0.15.2" >> "${GITHUB_PATH}"
+            "https://ziglang.org/download/${zig_version}/${zig_dir}.tar.xz" \
+            --output "${tarball}"
+          if command -v sha256sum >/dev/null 2>&1; then
+            printf '%s  %s\n' "${zig_sha256}" "${tarball}" | sha256sum --check --strict -
+          else
+            printf '%s  %s\n' "${zig_sha256}" "${tarball}" | shasum -a 256 --check --strict -
+          fi
+          tar -xJf "${tarball}" -C "${RUNNER_TEMP}"
+          echo "${RUNNER_TEMP}/${zig_dir}" >> "${GITHUB_PATH}"
 
       - name: Install cargo-zigbuild for Linux cross-builds
         if: matrix.builder == 'cargo-zigbuild'
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@1beb33eee6d086258184383af9a538940be190ed # v2.85.6
         with:
           tool: cargo-zigbuild
 
@@ -146,13 +173,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up stable Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master, as of 2026-08-02
+        with:
+          toolchain: stable
 
       - name: Cache Cargo registry and target
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2, as of 2026-08-02
 
       - name: Measure dependency budget
         run: ./scripts/dep-budget.sh
@@ -162,13 +191,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Rust 1.88 MSRV toolchain
-        uses: dtolnay/rust-toolchain@1.88
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master, as of 2026-08-02
+        with:
+          # Quoted: unquoted YAML reads this as a float, which would silently
+          # turn a future `1.90` into toolchain "1.9".
+          toolchain: "1.88"
 
       - name: Cache Cargo registry and target
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2, as of 2026-08-02
 
       - name: Check library with MSRV
         run: cargo check --locked
@@ -181,13 +214,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up stable Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master, as of 2026-08-02
+        with:
+          toolchain: stable
 
       - name: Cache Cargo registry and target
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2, as of 2026-08-02
 
       - name: Build conformance client
         run: cargo build --locked --release --bin conformance
@@ -233,19 +268,23 @@ jobs:
       FUZZ_SMOKE_SECONDS: "60"
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up nightly Rust
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master, as of 2026-08-02
+        with:
+          toolchain: nightly
 
       - name: Cache Cargo registry and fuzz target
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2, as of 2026-08-02
         with:
           workspaces: fuzz -> fuzz/target
           key: fuzz-nightly
 
       - name: Install cargo-fuzz
-        run: cargo +nightly install cargo-fuzz --locked
+        # `--locked` pins cargo-fuzz's dependencies but not cargo-fuzz itself;
+        # `--version` is what stops this gate's tooling from moving on its own.
+        run: cargo +nightly install cargo-fuzz --locked --version 0.13.2
 
       - name: Verify fixture-derived corpora are current
         run: |
