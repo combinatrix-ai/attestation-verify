@@ -1,0 +1,48 @@
+# cargo-deny configuration for the CI dependency-audit gate.
+#
+# This crate's whole value is that a caller can trust its verdict, so its
+# dependency graph is part of its security surface. The graph is deliberately
+# small (see scripts/dep-budget.sh); this file is what keeps a known-vulnerable
+# or unexpectedly-licensed crate from entering it unnoticed.
+
+[graph]
+# Match the dependency-budget gate: measure the committed graph for the
+# canonical Linux target rather than whatever the runner happens to be.
+targets = ["x86_64-unknown-linux-gnu"]
+all-features = true
+
+[advisories]
+# Fail on any advisory. `yanked = "deny"` is deliberate: a yanked crate in a
+# --locked build is a supply-chain signal, not a nuisance.
+yanked = "deny"
+ignore = []
+
+[licenses]
+# The RustCrypto stack is uniformly MIT OR Apache-2.0. Everything below that
+# is not is listed with the crate that brings it in, so a new entry has to be
+# a deliberate decision rather than a silent widening.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-3-Clause",  # subtle
+    "Unicode-3.0",   # unicode-ident, as `(MIT OR Apache-2.0) AND Unicode-3.0`
+]
+confidence-threshold = 0.93
+
+[bans]
+multiple-versions = "deny"
+wildcards = "deny"
+# The point of the budget is a graph a human can actually audit, and a second
+# copy of a crate doubles what that means. The one exception is pinned to an
+# exact version on purpose: when `der_derive` moves to syn 3, this entry stops
+# matching and cargo-deny reports it as unused, which is the reminder to delete
+# it. A bare `syn` would hide the next duplicate forever.
+skip = [
+    { crate = "syn@2.0.119", reason = "der_derive still builds against syn 2 while serde_derive and thiserror-impl are on syn 3; both are proc-macro build dependencies that do not reach the shipped library" },
+]
+deny = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
