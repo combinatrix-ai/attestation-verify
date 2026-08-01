@@ -20,3 +20,14 @@ pub const MAX_BUNDLES_PER_SET: usize = 64;
 
 /// Maximum number of certificates in a single certificate chain.
 pub const MAX_CERTIFICATES_PER_CHAIN: usize = 128;
+
+/// Maximum number of signature lines in a single checkpoint (signed note).
+///
+/// Tighter than the other limits on purpose: this one bounds *cryptographic*
+/// work, not allocation. `verify_checkpoint` tries every signature line
+/// against the selected log key, and the signature lines are covered by
+/// neither the SET nor the inclusion proof, so their count is attacker-
+/// controlled on an otherwise genuine bundle. Real checkpoints carry one
+/// signature (the log's own); the headroom is for a log co-signed by a
+/// witness quorum.
+pub const MAX_CHECKPOINT_SIGNATURES: usize = 32;
