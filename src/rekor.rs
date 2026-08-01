@@ -44,8 +44,10 @@ use sha2::{Digest, Sha256};
 use crate::bundle::{Bundle, DsseEnvelope, InclusionProof, TlogEntry};
 use crate::dsse::{EcdsaVerifyingKey, LeafCertificateInfo};
 use crate::error::{
-    ContentBindingError, Error, ParseError, TimestampError, TransparencyError, UnsupportedError,
+    ContentBindingError, Error, ParseError, ResourceLimitError, TimestampError, TransparencyError,
+    UnsupportedError,
 };
+use crate::limits;
 use crate::parse_util;
 use crate::strict_json;
 use crate::trust::{TransparencyLog, TrustStore, ValidityPeriod};
@@ -431,6 +433,14 @@ pub(crate) fn verify_inclusion_proof(
 /// notes use to prefix each signature line.
 const CHECKPOINT_SIGNATURE_PREFIX: &str = "\u{2014} ";
 
+/// The truncated key identifier carried ahead of each signed-note signature.
+const CHECKPOINT_KEY_HINT_BYTES: usize = 4;
+
+struct CheckpointSignature {
+    key_hint: [u8; CHECKPOINT_KEY_HINT_BYTES],
+    signature: Vec<u8>,
+}
+
 /// A parsed checkpoint (signed note) envelope.
 pub(crate) struct ParsedCheckpoint<'a> {
     tree_size: u64,
@@ -440,10 +450,10 @@ pub(crate) struct ParsedCheckpoint<'a> {
     /// line. This exact substring is what each signature is computed
     /// over.
     note_body: &'a str,
-    /// `(name, signature bytes)` for each signature line, with the
-    /// leading 4-byte key hint already stripped (unused: this crate
-    /// already knows which trusted key to try, from SET verification).
-    signatures: Vec<(&'a str, Vec<u8>)>,
+    /// Parsed signature lines. Verification uses the 4-byte key hint to
+    /// skip signatures for other keys before any expensive cryptographic
+    /// work.
+    signatures: Vec<CheckpointSignature>,
 }
 
 pub(crate) fn parse_checkpoint(envelope: &str) -> Result<ParsedCheckpoint<'_>, Error> {
@@ -473,7 +483,28 @@ pub(crate) fn parse_checkpoint(envelope: &str) -> Result<ParsedCheckpoint<'_>, E
     // Any further `body_lines` are extensions: opaque and unvalidated in
     // this task's scope.
 
-    let mut signatures = Vec::new();
+    // Bound the signature-line count *before* decoding any of them.
+    // An attacker can put the expected public key hint on every line, and
+    // these lines are covered by neither the SET nor the inclusion proof,
+    // so on an otherwise genuine bundle their number is entirely attacker-
+    // chosen: without this check one 8 MiB input buys ~10^5 ECDSA
+    // verifications, all spent before the certificate chain is looked at.
+    // Counting non-empty lines only, since empty ones are skipped below
+    // and cost nothing -- the bound is on verifications, not on bytes.
+    let signature_line_count = signature_text
+        .lines()
+        .filter(|line| !line.is_empty())
+        .count();
+    if signature_line_count > limits::MAX_CHECKPOINT_SIGNATURES {
+        return Err(Error::ResourceLimit(
+            ResourceLimitError::TooManyCheckpointSignatures {
+                actual: signature_line_count,
+                limit: limits::MAX_CHECKPOINT_SIGNATURES,
+            },
+        ));
+    }
+
+    let mut signatures = Vec::with_capacity(signature_line_count);
     for line in signature_text.lines() {
         if line.is_empty() {
             continue;
@@ -481,14 +512,20 @@ pub(crate) fn parse_checkpoint(envelope: &str) -> Result<ParsedCheckpoint<'_>, E
         let rest = line
             .strip_prefix(CHECKPOINT_SIGNATURE_PREFIX)
             .ok_or_else(|| malformed("signature line missing \"\u{2014} \" marker"))?;
-        let (name, blob_b64) = rest
+        let (_name, blob_b64) = rest
             .split_once(' ')
             .ok_or_else(|| malformed("signature line missing name/signature separator"))?;
         let blob = parse_util::strict_base64("checkpoint signature line", blob_b64)?;
-        if blob.len() <= 4 {
+        if blob.len() <= CHECKPOINT_KEY_HINT_BYTES {
             return Err(malformed("signature blob shorter than the 4-byte key hint"));
         }
-        signatures.push((name, blob[4..].to_vec()));
+        let key_hint = blob[..CHECKPOINT_KEY_HINT_BYTES]
+            .try_into()
+            .map_err(|_| malformed("signature blob has a malformed key hint"))?;
+        signatures.push(CheckpointSignature {
+            key_hint,
+            signature: blob[CHECKPOINT_KEY_HINT_BYTES..].to_vec(),
+        });
     }
     if signatures.is_empty() {
         return Err(malformed("no signature lines found"));
@@ -502,16 +539,32 @@ pub(crate) fn parse_checkpoint(envelope: &str) -> Result<ParsedCheckpoint<'_>, E
     })
 }
 
+fn checkpoint_key_hint(log: &TransparencyLog) -> Option<[u8; CHECKPOINT_KEY_HINT_BYTES]> {
+    if let Some(checkpoint_key_id) = &log.checkpoint_key_id {
+        return checkpoint_key_id
+            .get(..CHECKPOINT_KEY_HINT_BYTES)?
+            .try_into()
+            .ok();
+    }
+
+    Sha256::digest(&log.public_key.raw_bytes)[..CHECKPOINT_KEY_HINT_BYTES]
+        .try_into()
+        .ok()
+}
+
 /// Verifies a checkpoint envelope: its tree size and root hash must match
 /// the inclusion proof it anchors, and at least one of its signature
-/// lines must verify against `log_key` — the same trusted key already
-/// selected for the SET (`DESIGN.md` "Rekor-entry <-> bundle binding":
-/// `logId == selected trusted key`).
+/// lines with the trusted log's 4-byte signed-note key hint must verify
+/// against `log_key` — the same trusted key already selected for the SET
+/// (`DESIGN.md` "Rekor-entry <-> bundle binding": `logId == selected trusted
+/// key`). Non-matching hints are skipped before ECDSA verification.
 ///
 /// # Errors
 ///
 /// Returns [`ParseError::Checkpoint`] if `envelope` does not match the
 /// expected signed-note structure,
+/// [`ResourceLimitError::TooManyCheckpointSignatures`] if it carries more
+/// signature lines than [`limits::MAX_CHECKPOINT_SIGNATURES`],
 /// [`TransparencyError::CheckpointTreeSizeMismatch`] /
 /// [`TransparencyError::CheckpointRootHashMismatch`] on a mismatch
 /// against `proof_tree_size` / `proof_root_hash`, and
@@ -521,6 +574,7 @@ pub(crate) fn verify_checkpoint(
     envelope: &str,
     proof_tree_size: u64,
     proof_root_hash: &[u8],
+    log: &TransparencyLog,
     log_key: &EcdsaVerifyingKey,
 ) -> Result<(), Error> {
     let checkpoint = parse_checkpoint(envelope)?;
@@ -535,10 +589,16 @@ pub(crate) fn verify_checkpoint(
         ));
     }
     let note_body_bytes = checkpoint.note_body.as_bytes();
+    let Some(key_hint) = checkpoint_key_hint(log) else {
+        return Err(Error::Transparency(
+            TransparencyError::CheckpointSignatureInvalid,
+        ));
+    };
     let verified = checkpoint
         .signatures
         .iter()
-        .any(|(_name, sig)| log_key.verify_der(note_body_bytes, sig));
+        .filter(|signature| signature.key_hint == key_hint)
+        .any(|signature| log_key.verify_der(note_body_bytes, &signature.signature));
     if verified {
         Ok(())
     } else {
@@ -672,6 +732,7 @@ pub(crate) fn verify_tlog_entry(
         &inclusion_proof.checkpoint.envelope,
         inclusion_proof.tree_size,
         &inclusion_proof.root_hash,
+        log,
         &log_key,
     )?;
 
@@ -735,15 +796,24 @@ mod tests {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
 
     use super::{
-        VerifiedTimestamp, check_entry_binding, check_time_window, parse_tlog_entry_body,
-        select_log_key, verify_checkpoint, verify_inclusion_proof, verify_set, verify_tlog_entry,
+        CHECKPOINT_SIGNATURE_PREFIX, VerifiedTimestamp, check_entry_binding, check_time_window,
+        parse_tlog_entry_body, select_log_key, verify_checkpoint, verify_inclusion_proof,
+        verify_set, verify_tlog_entry,
     };
     use crate::bundle::Bundle;
-    use crate::dsse::LeafCertificateInfo;
+    use crate::dsse::{LeafCertificateInfo, reset_verify_der_call_count, verify_der_call_count};
     use crate::error::{
-        ContentBindingError, Error, TimestampError, TransparencyError, UnsupportedError,
+        ContentBindingError, Error, ResourceLimitError, TimestampError, TransparencyError,
+        UnsupportedError,
     };
+    use crate::limits;
+    use crate::policy::{
+        GithubPolicy, RefPolicy, RepositoryIdentity, SignerPolicy, SourcePolicy, WorkflowPath,
+        WorkflowRevisionPolicy,
+    };
+    use crate::subject::Subject;
     use crate::trust::{TrustStore, ValidityPeriod};
+    use crate::verifier::Verifier;
 
     const GOLDEN_FIXTURE: &str = "github-cli/tarball-user-slsa-provenance.json";
 
@@ -763,6 +833,27 @@ mod tests {
 
     fn embedded_trust_store() -> Result<TrustStore, Box<dyn std::error::Error>> {
         Ok(TrustStore::embedded_public_good()?)
+    }
+
+    fn verifier_with_correct_policy() -> Result<Verifier, Box<dyn std::error::Error>> {
+        let policy = GithubPolicy::builder()
+            .source(SourcePolicy {
+                repository: RepositoryIdentity::parse("cli/cli")?
+                    .with_owner_id(59_704_711)
+                    .with_repository_id(212_613_049),
+                git_ref: RefPolicy::Exact("refs/heads/trunk".to_owned()),
+                commit: None,
+            })
+            .signer(SignerPolicy {
+                repository: RepositoryIdentity::parse("cli/cli")?,
+                path: WorkflowPath::new(".github/workflows/deployment.yml")?,
+                revision: WorkflowRevisionPolicy::Any,
+            })
+            .build()?;
+        Ok(Verifier::builder()
+            .trust_store(embedded_trust_store()?)
+            .github_policy(policy)
+            .build()?)
     }
 
     /// Parses the golden fixture as JSON, lets `f` mutate it, then
@@ -791,6 +882,33 @@ mod tests {
         bundle_value["verificationMaterial"]["tlogEntries"][0]["canonicalizedBody"] =
             serde_json::Value::String(STANDARD.encode(serde_json::to_vec(&body_value)?));
         Ok(())
+    }
+
+    /// Returns `envelope` with `count` decoy signature lines inserted
+    /// ahead of its genuine one, leaving the genuine signature last.
+    ///
+    /// Each decoy carries the smallest well-formed DER ECDSA signature,
+    /// `SEQUENCE { INTEGER 1, INTEGER 1 }`, behind the 4-byte key hint:
+    /// well-formed enough to reach the curve arithmetic, and the cheapest
+    /// possible bytes-per-verification for an attacker.
+    fn prepend_decoy_signature_lines(
+        envelope: &str,
+        count: usize,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let (body, genuine_signatures) = envelope
+            .split_once("\n\n")
+            .ok_or("missing blank line separating body from signatures")?;
+        let decoy_blob = STANDARD.encode([0, 0, 0, 0, 0x30, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 1]);
+        let mut flooded = String::from(body);
+        flooded.push_str("\n\n");
+        for _ in 0..count {
+            flooded.push_str(CHECKPOINT_SIGNATURE_PREFIX);
+            flooded.push_str("decoy ");
+            flooded.push_str(&decoy_blob);
+            flooded.push('\n');
+        }
+        flooded.push_str(genuine_signatures);
+        Ok(flooded)
     }
 
     fn replace_checkpoint_line(
@@ -871,11 +989,12 @@ mod tests {
             .inclusion_proof
             .as_ref()
             .ok_or("missing inclusion proof")?;
-        let (_log, log_key) = select_log_key(&trust_store, &tlog_entry.log_id_key_id)?;
+        let (log, log_key) = select_log_key(&trust_store, &tlog_entry.log_id_key_id)?;
         verify_checkpoint(
             &proof.checkpoint.envelope,
             proof.tree_size,
             &proof.root_hash,
+            log,
             &log_key,
         )?;
         Ok(())
@@ -1231,7 +1350,7 @@ mod tests {
             .inclusion_proof
             .as_ref()
             .ok_or("missing inclusion proof")?;
-        let (_log, log_key) = select_log_key(&trust_store, &tlog_entry.log_id_key_id)?;
+        let (log, log_key) = select_log_key(&trust_store, &tlog_entry.log_id_key_id)?;
 
         let mutated_envelope = replace_checkpoint_line(
             &proof.checkpoint.envelope,
@@ -1242,6 +1361,7 @@ mod tests {
             &mutated_envelope,
             proof.tree_size,
             &proof.root_hash,
+            log,
             &log_key,
         ) {
             Err(Error::Transparency(TransparencyError::CheckpointTreeSizeMismatch)) => Ok(()),
@@ -1258,7 +1378,7 @@ mod tests {
             .inclusion_proof
             .as_ref()
             .ok_or("missing inclusion proof")?;
-        let (_log, log_key) = select_log_key(&trust_store, &tlog_entry.log_id_key_id)?;
+        let (log, log_key) = select_log_key(&trust_store, &tlog_entry.log_id_key_id)?;
 
         let mut decoded = STANDARD.decode(
             proof
@@ -1275,6 +1395,7 @@ mod tests {
             &mutated_envelope,
             proof.tree_size,
             &proof.root_hash,
+            log,
             &log_key,
         ) {
             Err(Error::Transparency(TransparencyError::CheckpointRootHashMismatch)) => Ok(()),
@@ -1291,7 +1412,7 @@ mod tests {
             .inclusion_proof
             .as_ref()
             .ok_or("missing inclusion proof")?;
-        let (_log, log_key) = select_log_key(&trust_store, &tlog_entry.log_id_key_id)?;
+        let (log, log_key) = select_log_key(&trust_store, &tlog_entry.log_id_key_id)?;
 
         let sig_line = proof
             .checkpoint
@@ -1313,11 +1434,136 @@ mod tests {
             &mutated_envelope,
             proof.tree_size,
             &proof.root_hash,
+            log,
             &log_key,
         ) {
             Err(Error::Transparency(TransparencyError::CheckpointSignatureInvalid)) => Ok(()),
             other => Err(format!("expected CheckpointSignatureInvalid, got {other:?}").into()),
         }
+    }
+
+    #[test]
+    fn checkpoint_signature_flood_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        let bundle = real_bundle()?;
+        let trust_store = embedded_trust_store()?;
+        let tlog_entry = &bundle.verification_material.tlog_entries[0];
+        let proof = tlog_entry
+            .inclusion_proof
+            .as_ref()
+            .ok_or("missing inclusion proof")?;
+        let (log, log_key) = select_log_key(&trust_store, &tlog_entry.log_id_key_id)?;
+
+        // The genuine signature is still present, and last. Without the
+        // count check this envelope verifies *successfully*, having first
+        // spent one ECDSA verification per decoy -- so a check that only
+        // rejected invalid signatures would not close this. Nothing binds
+        // these lines to the rest of the entry: the SET and the inclusion
+        // proof both cover the note body, not its signature block, which
+        // is what lets an attacker pad an otherwise genuine bundle.
+        let flooded = prepend_decoy_signature_lines(
+            &proof.checkpoint.envelope,
+            limits::MAX_CHECKPOINT_SIGNATURES,
+        )?;
+        match verify_checkpoint(&flooded, proof.tree_size, &proof.root_hash, log, &log_key) {
+            Err(Error::ResourceLimit(ResourceLimitError::TooManyCheckpointSignatures {
+                actual,
+                limit,
+            })) if actual == limits::MAX_CHECKPOINT_SIGNATURES + 1
+                && limit == limits::MAX_CHECKPOINT_SIGNATURES =>
+            {
+                Ok(())
+            }
+            other => Err(format!("expected TooManyCheckpointSignatures, got {other:?}").into()),
+        }
+    }
+
+    #[test]
+    fn checkpoint_at_the_signature_limit_still_verifies() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let bundle = real_bundle()?;
+        let trust_store = embedded_trust_store()?;
+        let tlog_entry = &bundle.verification_material.tlog_entries[0];
+        let proof = tlog_entry
+            .inclusion_proof
+            .as_ref()
+            .ok_or("missing inclusion proof")?;
+        let (log, log_key) = select_log_key(&trust_store, &tlog_entry.log_id_key_id)?;
+
+        // Exactly at the limit, with the genuine signature last: pins that
+        // the bound is inclusive, and that a checkpoint whose own signature
+        // is not the first line (a witness-cosigned log) still verifies.
+        let padded = prepend_decoy_signature_lines(
+            &proof.checkpoint.envelope,
+            limits::MAX_CHECKPOINT_SIGNATURES - 1,
+        )?;
+        verify_checkpoint(&padded, proof.tree_size, &proof.root_hash, log, &log_key)?;
+        Ok(())
+    }
+
+    #[test]
+    fn public_verifier_skips_checkpoint_signatures_with_other_key_hints()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let verifier = verifier_with_correct_policy()?;
+        let genuine_bundle = real_bundle()?;
+        let subject = Subject::from_digest_hex(
+            "f146e594bdba65fdc499c43c86d6d07c0e0733257152067c4f9fe2acee4f4629",
+        )?;
+
+        reset_verify_der_call_count();
+        verifier.verify_digest(&subject, &genuine_bundle)?;
+        let genuine_verify_calls = verify_der_call_count();
+        if genuine_verify_calls == 0 {
+            return Err("expected the public verifier to perform ECDSA verification".into());
+        }
+
+        let mut padded_bundle = real_bundle()?;
+        let proof = padded_bundle.verification_material.tlog_entries[0]
+            .inclusion_proof
+            .as_mut()
+            .ok_or("missing inclusion proof")?;
+        proof.checkpoint.envelope = prepend_decoy_signature_lines(
+            &proof.checkpoint.envelope,
+            limits::MAX_CHECKPOINT_SIGNATURES - 1,
+        )?;
+
+        reset_verify_der_call_count();
+        verifier.verify_digest(&subject, &padded_bundle)?;
+        let padded_verify_calls = verify_der_call_count();
+
+        if padded_verify_calls != genuine_verify_calls {
+            return Err(format!(
+                "non-matching checkpoint key hints caused extra ECDSA verification: genuine={genuine_verify_calls}, padded={padded_verify_calls}"
+            )
+            .into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn blank_signature_lines_do_not_count_toward_the_limit()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let bundle = real_bundle()?;
+        let trust_store = embedded_trust_store()?;
+        let tlog_entry = &bundle.verification_material.tlog_entries[0];
+        let proof = tlog_entry
+            .inclusion_proof
+            .as_ref()
+            .ok_or("missing inclusion proof")?;
+        let (log, log_key) = select_log_key(&trust_store, &tlog_entry.log_id_key_id)?;
+
+        // The limit bounds verifications, not bytes: blank lines are
+        // skipped before any decode, so they must not trip it.
+        let (body, genuine_signatures) = proof
+            .checkpoint
+            .envelope
+            .split_once("\n\n")
+            .ok_or("missing blank line separating body from signatures")?;
+        let padded = format!(
+            "{body}\n\n{}{genuine_signatures}",
+            "\n".repeat(limits::MAX_CHECKPOINT_SIGNATURES * 4)
+        );
+        verify_checkpoint(&padded, proof.tree_size, &proof.root_hash, log, &log_key)?;
+        Ok(())
     }
 
     // -------------------------------------------------------------

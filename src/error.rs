@@ -590,4 +590,13 @@ pub enum ResourceLimitError {
         /// The maximum accepted number of certificates.
         limit: usize,
     },
+
+    /// A checkpoint carried more signature lines than the limit.
+    #[error("{actual} checkpoint signature lines exceeds the limit of {limit}")]
+    TooManyCheckpointSignatures {
+        /// The actual number of signature lines found.
+        actual: usize,
+        /// The maximum accepted number of signature lines.
+        limit: usize,
+    },
 }
