@@ -170,8 +170,9 @@ signature; entry certificate/key == bundle leaf; entry payload hash ==
 decoded DSSE payload hash; entry kind/version in the supported exact set
 (`dsse`/`intoto`, pinned versions); SET canonical body == inclusion-leaf
 body; proof root/tree size == checkpoint root/tree size; `logId` ==
-selected trusted key; checkpoint origin, signature key name, and key hint
-identify that selected trusted log instance. (Modeled on Cosign
+selected trusted key; the checkpoint signature's key name and key ID
+identify that selected trusted log instance; checkpoint origin is
+integrity-protected by the verified signature. (Modeled on Cosign
 GHSA-whqx-f9j3-ch6m, where an unrelated valid Rekor entry satisfied
 verification; regression fixtures reproduce that shape.)
 
@@ -185,15 +186,28 @@ the leaf's position within the specific tree the proof was issued
 against. Implementing the equality would reject this genuine bundle and
 any others whose two indices differ.
 
-**Checkpoint log-identity binding is a live, unimplemented requirement.**
-The origin is integrity-protected because it sits inside the signed note
-body, but signature protection alone does not bind it to the selected
-`TransparencyLog` instance. Sigstore explicitly does not guarantee that
-`logId` is unique across deployments; the verifier must compare the
-checkpoint origin and the signature line's key name and key hint with the
-selected trusted-log metadata. The 4-byte hint is only a candidate-key
-prefilter and is public, so an attacker can copy it onto every decoy line;
-`MAX_CHECKPOINT_SIGNATURES` remains the hard bound on cryptographic work.
+**Checkpoint signed-note key binding is a live, unimplemented requirement.**
+Sigstore explicitly does not guarantee that `logId` is unique across
+deployments; the verifier must select the `TransparencyLog` instance using
+the signature line's `(key name, key ID)` tuple. For the current public root,
+key-name matching treats a trusted `baseUrl` with one leading `https://` as
+equivalent to its scheme-less form and otherwise compares bytes exactly; it
+does not perform general URL, DNS, case, Unicode, or trailing-slash
+normalization. The expected key ID is `checkpointKeyId`, falling back as the
+TrustedRoot specification requires when that legacy field is absent.
+
+The checkpoint origin is separately integrity-protected because it sits
+inside the signed note body, but it is not an additional exact-match log
+selector. The checkpoint specification only says that the log key name
+SHOULD match the origin, and the real `cli/cli` fixture legitimately carries
+origin `rekor.sigstore.dev - 1193050959916656506`, key name
+`rekor.sigstore.dev`, and trusted `baseUrl` `https://rekor.sigstore.dev`.
+Origin tampering must therefore fail signature verification, while exact
+origin-to-key-name or origin-to-`baseUrl` equality must not be required.
+
+The 4-byte key ID is only a candidate-key prefilter and is public, so an
+attacker can copy it onto every decoy line; `MAX_CHECKPOINT_SIGNATURES`
+remains the hard bound on cryptographic work.
 
 ## X.509 / Fulcio validation profile (normative)
 
@@ -312,7 +326,8 @@ tests on macOS + Linux.
 - Mutation negatives — per chain step AND the cross-binding class:
   unrelated-but-valid Rekor entry/SET (advisory shape); altered unsigned
   `integratedTime`; SET without proof and proof without SET; index/tree-
-  size/root/origin mismatches; wrong log ID; v1/v2 confusion; unsupported
+  size/root mismatches; checkpoint-origin tampering; wrong log ID; wrong
+  checkpoint signature key name/key ID; v1/v2 confusion; unsupported
   kind/version; zero/multiple DSSE signatures; wrong payload type; malformed
   PAE; untrusted embedded root; reordered chain; CA-constraint and KU/EKU
   violations; unknown critical extension; SCT wrong issuer/key/
