@@ -44,13 +44,16 @@ impl Statement {
     ///
     /// # Errors
     ///
-    /// Returns [`ParseError::Json`] for malformed JSON (including
-    /// duplicate object keys), [`UnsupportedError::StatementType`] if
-    /// `_type` is not [`STATEMENT_TYPE`], [`ResourceLimitError::TooManySubjects`]
-    /// if the subject count exceeds the crate's limit, and
+    /// Returns [`ResourceLimitError::InputTooLarge`] if `bytes` exceeds the
+    /// crate-wide input limit, [`ParseError::Json`] for malformed JSON
+    /// (including duplicate object keys), [`UnsupportedError::StatementType`]
+    /// if `_type` is not [`STATEMENT_TYPE`],
+    /// [`ResourceLimitError::TooManySubjects`] if the subject count exceeds
+    /// the crate's limit, and
     /// [`ParseError::MalformedSubject`] if any subject's digest map is
     /// empty or has a malformed `sha256` value.
     pub fn from_payload(bytes: &[u8]) -> Result<Self, Error> {
+        parse_util::check_input_size(bytes)?;
         let value = strict_json::parse_strict(bytes)?;
         let raw: RawStatement =
             serde_json::from_value(value).map_err(|e| ParseError::Json(e.to_string()))?;
@@ -171,7 +174,8 @@ struct RawStatementSubject {
 #[cfg(test)]
 mod tests {
     use super::{STATEMENT_TYPE, Statement};
-    use crate::error::{Error, ParseError, UnsupportedError};
+    use crate::error::{Error, ParseError, ResourceLimitError, UnsupportedError};
+    use crate::limits;
     use crate::subject::Subject;
 
     fn valid_statement_json(subjects: &str) -> String {
@@ -234,6 +238,19 @@ mod tests {
         match Statement::from_payload(json.as_bytes()) {
             Err(Error::Unsupported(UnsupportedError::StatementType { .. })) => Ok(()),
             other => Err(format!("expected StatementType error, got {other:?}").into()),
+        }
+    }
+
+    #[test]
+    fn rejects_oversized_payload_before_parsing() -> Result<(), Box<dyn std::error::Error>> {
+        let payload = vec![b' '; limits::MAX_INPUT_BYTES + 1];
+        match Statement::from_payload(&payload) {
+            Err(Error::ResourceLimit(ResourceLimitError::InputTooLarge { actual, limit }))
+                if actual == payload.len() && limit == limits::MAX_INPUT_BYTES =>
+            {
+                Ok(())
+            }
+            other => Err(format!("expected InputTooLarge error, got {other:?}").into()),
         }
     }
 }
