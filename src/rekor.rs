@@ -539,7 +539,9 @@ pub(crate) fn parse_checkpoint(envelope: &str) -> Result<ParsedCheckpoint<'_>, E
     })
 }
 
-fn checkpoint_key_hint(log: &TransparencyLog) -> Option<[u8; CHECKPOINT_KEY_HINT_BYTES]> {
+pub(crate) fn checkpoint_key_hint(
+    log: &TransparencyLog,
+) -> Option<[u8; CHECKPOINT_KEY_HINT_BYTES]> {
     if let Some(checkpoint_key_id) = &log.checkpoint_key_id {
         return checkpoint_key_id
             .get(..CHECKPOINT_KEY_HINT_BYTES)?
