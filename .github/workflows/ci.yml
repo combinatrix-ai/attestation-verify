@@ -260,7 +260,7 @@ jobs:
           xfail: ${{ steps.conformance-xfails.outputs.patterns }}
 
   fuzz:
-    name: Parser fuzz smoke
+    name: Fuzz smoke
     runs-on: ubuntu-latest
     env:
       # Keep the complete CI budget in one obvious place so it can be raised
@@ -292,7 +292,7 @@ jobs:
           python3 fuzz/scripts/generate_corpora.py
           git diff --exit-code -- fuzz/corpus
 
-      - name: Run bounded smoke fuzzing for every parser target
+      - name: Run bounded smoke fuzzing for every target
         run: |
           set -euo pipefail
           targets=(
@@ -303,6 +303,7 @@ jobs:
             trusted_root
             rekor_body
             checkpoint
+            checkpoint_verify
             sct
             rfc3339
           )

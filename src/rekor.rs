@@ -608,6 +608,28 @@ pub(crate) fn verify_checkpoint(
     }
 }
 
+/// Runs [`verify_checkpoint`] with the envelope anchored to its *own*
+/// declared tree size and root hash, so the two binding comparisons
+/// always pass and the signature block is always reached.
+///
+/// Fuzzing-only. Feeding a fuzzer arbitrary `proof_tree_size` /
+/// `proof_root_hash` would mean nearly every input died at the tree-size
+/// comparison, leaving the key-hint filter, the signature-count bound,
+/// and the ECDSA loop — the parts whose cost and control flow are driven
+/// by attacker-chosen bytes — effectively unreachable. Those two
+/// comparisons are covered by unit tests instead; neutralising them here
+/// is what buys coverage of everything after them.
+#[cfg(feature = "fuzzing")]
+pub(crate) fn verify_checkpoint_self_anchored(
+    envelope: &str,
+    log: &TransparencyLog,
+    log_key: &EcdsaVerifyingKey,
+) -> Result<(), Error> {
+    let checkpoint = parse_checkpoint(envelope)?;
+    let (tree_size, root_hash) = (checkpoint.tree_size, checkpoint.root_hash.clone());
+    verify_checkpoint(envelope, tree_size, &root_hash, log, log_key)
+}
+
 // ---------------------------------------------------------------------
 // 5. Time window
 // ---------------------------------------------------------------------
