@@ -207,20 +207,12 @@ struct SignerUriParts<'a> {
 
 /// Parses a signer-workflow SAN URI: `owner`/`name` are the first two
 /// `/`-separated path segments after the `https://github.com/` prefix
-/// (repository owners and names never themselves contain `/`); the `@`
-/// splitting `{workflow_path}` from `{ref}` is the *first* one after
-/// that prefix, not the last.
-///
-/// GitHub repository owner and name segments are platform-guaranteed
-/// never to contain `@` (GitHub's login/repository-name character set
-/// excludes it), so the first `@` after the prefix is unambiguously
-/// Fulcio's own delimiter, regardless of what the ref portion contains
-/// afterward. Splitting on the *last* `@` instead would be wrong the
-/// moment a ref legitimately contains one (git's own ref-name rules
-/// permit a bare `@`, just not `@{`): it would consume part of the ref
-/// into `workflow_path` instead, silently corrupting both. Splitting on
-/// the first `@` has no equivalent failure mode for any input this crate
-/// treats as authoritative (a real Fulcio-issued SAN).
+/// (repository owners and names never themselves contain `/`). Exactly
+/// one `@` must separate `{workflow_path}` from `{ref}`. Additional `@`
+/// characters are rejected because, without an escaping rule, it is
+/// impossible to determine whether they belong to the workflow path or
+/// the ref. Accepting such an ambiguous identity could make one workflow
+/// path appear to be another during policy matching.
 fn parse_signer_san_uri(uri: &str) -> Result<SignerUriParts<'_>, Error> {
     const CLAIM: &str = "san_uri";
 
@@ -230,6 +222,12 @@ fn parse_signer_san_uri(uri: &str) -> Result<SignerUriParts<'_>, Error> {
     let (repo_and_path, git_ref) = rest
         .split_once('@')
         .ok_or_else(|| malformed_claim(CLAIM, "missing '@' revision separator"))?;
+    if git_ref.contains('@') {
+        return Err(malformed_claim(
+            CLAIM,
+            "ambiguous additional '@' in workflow identity",
+        ));
+    }
     if git_ref.is_empty() {
         return Err(malformed_claim(CLAIM, "empty revision after '@'"));
     }
@@ -625,24 +623,10 @@ mod tests {
     }
 
     #[test]
-    fn san_uri_splits_on_first_at_not_last() -> Result<(), Box<dyn std::error::Error>> {
-        // A ref that itself contains '@' (git's ref-name rules permit a
-        // bare '@', just not '@{') must not confuse the workflow-path/ref
-        // boundary: splitting on the *first* '@' after the prefix always
-        // finds Fulcio's own delimiter, since owner/name can never
-        // contain '@'. Splitting on the *last* '@' would instead find
-        // this ref's own embedded '@' and corrupt both halves -- this
-        // test pins the correct (first-'@') behavior.
-        let parts = parse_signer_san_uri(
+    fn rejects_san_uri_with_ambiguous_additional_at() -> Result<(), Box<dyn std::error::Error>> {
+        expect_malformed(parse_signer_san_uri(
             "https://github.com/cli/cli/.github/workflows/deployment.yml@refs/heads/weird@name",
-        )?;
-        if parts.workflow_path != ".github/workflows/deployment.yml" {
-            return Err(format!("unexpected workflow_path: {}", parts.workflow_path).into());
-        }
-        if parts.git_ref != "refs/heads/weird@name" {
-            return Err(format!("unexpected git_ref: {}", parts.git_ref).into());
-        }
-        Ok(())
+        ))
     }
 
     #[test]
@@ -746,6 +730,22 @@ mod tests {
             return Err("unexpected repository in MatchedIdentity".into());
         }
         Ok(())
+    }
+
+    #[test]
+    fn match_policy_rejects_ambiguous_workflow_identity_with_any_revision()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let claims = FulcioClaims {
+            san_uri: Some(
+                "https://github.com/cli/cli/.github/workflows/deployment.yml@evil.yaml@refs/heads/trunk"
+                    .to_owned(),
+            ),
+            ..synthetic_claims()
+        };
+        expect_malformed(match_policy(
+            &claims,
+            &synthetic_policy(WorkflowRevisionPolicy::Any)?,
+        ))
     }
 
     #[test]
