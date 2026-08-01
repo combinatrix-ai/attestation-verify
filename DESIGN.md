@@ -170,12 +170,10 @@ signature; entry certificate/key == bundle leaf; entry payload hash ==
 decoded DSSE payload hash; entry kind/version in the supported exact set
 (`dsse`/`intoto`, pinned versions); SET canonical body == inclusion-leaf
 body; proof root/tree size == checkpoint root/tree size; `logId` ==
-selected trusted key. (Modeled on Cosign GHSA-whqx-f9j3-ch6m, where an
-unrelated valid Rekor entry satisfied verification; regression fixtures
-reproduce that shape.)
-
-Two requirements that earlier drafts of this section listed are recorded
-below instead, so that neither is mistaken for an unimplemented check.
+selected trusted key; checkpoint origin, signature key name, and key hint
+identify that selected trusted log instance. (Modeled on Cosign
+GHSA-whqx-f9j3-ch6m, where an unrelated valid Rekor entry satisfied
+verification; regression fixtures reproduce that shape.)
 
 **`logIndex` is NOT compared against the inclusion proof's index.** An
 earlier draft required `entry logIndex == proof index`; real bundles
@@ -184,17 +182,18 @@ refute it. The `cli/cli` golden fixture carries `logIndex` 2049189324 and
 different quantities in `sigstore_rekor.proto`: the entry's own
 `logIndex` is its position in the log as a whole, while the proof's is
 the leaf's position within the specific tree the proof was issued
-against. Implementing the equality would reject every genuine bundle.
+against. Implementing the equality would reject this genuine bundle and
+any others whose two indices differ.
 
-**Checkpoint origin binding is specified but not yet implemented.** The
-origin line, the signature line's name, and the 4-byte key hint are all
-parsed and discarded (`src/rekor.rs`). The origin is not unprotected —
-it sits inside the signed note body, so altering it fails the checkpoint
-signature check — and the key is selected from the entry's `logId`
-against the trust store, not from the checkpoint's own labels. Binding
-them is defence in depth, not a live gap; it is worth doing because the
-unused key hint is also what makes signature-line fan-out cheap
-(`MAX_CHECKPOINT_SIGNATURES`).
+**Checkpoint log-identity binding is a live, unimplemented requirement.**
+The origin is integrity-protected because it sits inside the signed note
+body, but signature protection alone does not bind it to the selected
+`TransparencyLog` instance. Sigstore explicitly does not guarantee that
+`logId` is unique across deployments; the verifier must compare the
+checkpoint origin and the signature line's key name and key hint with the
+selected trusted-log metadata. The 4-byte hint is only a candidate-key
+prefilter and is public, so an attacker can copy it onto every decoy line;
+`MAX_CHECKPOINT_SIGNATURES` remains the hard bound on cryptographic work.
 
 ## X.509 / Fulcio validation profile (normative)
 
@@ -324,11 +323,11 @@ tests on macOS + Linux.
   unknown digest; duplicate JSON keys; oversized inputs, deep nesting,
   integer overflow, negative index/time; root rotation and stale-updater
   recovery.
-- **Low-S is NOT enforced, and must not be.** An earlier draft listed
-  "high-S ECDSA" as a mutation negative. Every signature in the `cli/cli`
-  golden fixture is high-S — the Rekor checkpoint signature, the SET, and
-  the DSSE signature alike — so rejecting high-S anywhere in this chain
-  would reject genuine bundles. ECDSA malleability is also not exploitable
+- **Low-S is not enforced at the three custom P-256 verification sites.**
+  An earlier draft listed "high-S ECDSA" as a mutation negative. The
+  `cli/cli` golden fixture's Rekor checkpoint, SET, and DSSE signatures are
+  all high-S, so enforcing low-S at those sites would reject this genuine
+  bundle. ECDSA malleability does not create an alternate accepted binding
   here: the DSSE signature bytes are compared against the Rekor entry body
   byte-for-byte, and that body is Merkle-committed, while the SET and
   checkpoint signatures are not re-bound anywhere, so re-encoding one
