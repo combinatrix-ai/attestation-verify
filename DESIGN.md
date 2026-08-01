@@ -169,11 +169,32 @@ Reject unless ALL hold (Rekor v1): entry signature == the single DSSE
 signature; entry certificate/key == bundle leaf; entry payload hash ==
 decoded DSSE payload hash; entry kind/version in the supported exact set
 (`dsse`/`intoto`, pinned versions); SET canonical body == inclusion-leaf
-body; entry `logIndex` == proof index; proof root/tree size == checkpoint
-root/tree size; `logId` == selected trusted key; checkpoint origin == trusted
-log identity. (Modeled on Cosign GHSA-whqx-f9j3-ch6m, where an unrelated
-valid Rekor entry satisfied verification; regression fixtures reproduce that
-shape.)
+body; proof root/tree size == checkpoint root/tree size; `logId` ==
+selected trusted key. (Modeled on Cosign GHSA-whqx-f9j3-ch6m, where an
+unrelated valid Rekor entry satisfied verification; regression fixtures
+reproduce that shape.)
+
+Two requirements that earlier drafts of this section listed are recorded
+below instead, so that neither is mistaken for an unimplemented check.
+
+**`logIndex` is NOT compared against the inclusion proof's index.** An
+earlier draft required `entry logIndex == proof index`; real bundles
+refute it. The `cli/cli` golden fixture carries `logIndex` 2049189324 and
+`inclusionProof.logIndex` 1927285062 (`treeSize` 1927285185). These are
+different quantities in `sigstore_rekor.proto`: the entry's own
+`logIndex` is its position in the log as a whole, while the proof's is
+the leaf's position within the specific tree the proof was issued
+against. Implementing the equality would reject every genuine bundle.
+
+**Checkpoint origin binding is specified but not yet implemented.** The
+origin line, the signature line's name, and the 4-byte key hint are all
+parsed and discarded (`src/rekor.rs`). The origin is not unprotected —
+it sits inside the signed note body, so altering it fails the checkpoint
+signature check — and the key is selected from the entry's `logId`
+against the trust store, not from the checkpoint's own labels. Binding
+them is defence in depth, not a live gap; it is worth doing because the
+unused key hint is also what makes signature-line fan-out cheap
+(`MAX_CHECKPOINT_SIGNATURES`).
 
 ## X.509 / Fulcio validation profile (normative)
 
@@ -294,8 +315,8 @@ tests on macOS + Linux.
   `integratedTime`; SET without proof and proof without SET; index/tree-
   size/root/origin mismatches; wrong log ID; v1/v2 confusion; unsupported
   kind/version; zero/multiple DSSE signatures; wrong payload type; malformed
-  PAE; high-S ECDSA; untrusted embedded root; reordered chain; CA-constraint
-  and KU/EKU violations; unknown critical extension; SCT wrong issuer/key/
+  PAE; untrusted embedded root; reordered chain; CA-constraint and KU/EKU
+  violations; unknown critical extension; SCT wrong issuer/key/
   altered/out-of-window; cert valid at SCT time but not SET time; duplicate
   or malformed Fulcio extensions; source vs reusable signer-workflow
   confusion; owner/repo rename-recreation-transfer; case normalization;
@@ -303,6 +324,15 @@ tests on macOS + Linux.
   unknown digest; duplicate JSON keys; oversized inputs, deep nesting,
   integer overflow, negative index/time; root rotation and stale-updater
   recovery.
+- **Low-S is NOT enforced, and must not be.** An earlier draft listed
+  "high-S ECDSA" as a mutation negative. Every signature in the `cli/cli`
+  golden fixture is high-S — the Rekor checkpoint signature, the SET, and
+  the DSSE signature alike — so rejecting high-S anywhere in this chain
+  would reject genuine bundles. ECDSA malleability is also not exploitable
+  here: the DSSE signature bytes are compared against the Rekor entry body
+  byte-for-byte, and that body is Merkle-committed, while the SET and
+  checkpoint signatures are not re-bound anywhere, so re-encoding one
+  gains an attacker nothing.
 - Determinism test: identical results regardless of system clock.
 - Fuzz targets + hard resource limits ship with the first parser; corpus
   maturity grows later.
