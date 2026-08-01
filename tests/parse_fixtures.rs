@@ -428,3 +428,175 @@ fn subject_from_digest_hex_rejects_63_65_and_non_hex() -> Result<(), Box<dyn std
     }
     Ok(())
 }
+
+// ---------------------------------------------------------------------
+// Fixture facts that DESIGN.md's normative sections argue *from*.
+//
+// Both sections explain why a check is deliberately absent, and both
+// arguments rest on what the real `cli/cli` bundle happens to contain. A
+// fixture refresh that changed either would leave the document asserting
+// something false, and the natural next step -- "implement the missing
+// check" -- would then start rejecting genuine bundles. These tests fail
+// at that moment instead.
+// ---------------------------------------------------------------------
+
+/// Reads the golden fixture as raw JSON.
+///
+/// Deliberately not through [`Bundle`]: the claims below are about what
+/// the file contains, so reading them through the crate's own model would
+/// let a modelling change mask a fixture change.
+fn golden_fixture_json() -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    Ok(serde_json::from_slice(&read_fixture(
+        "github-cli/tarball-user-slsa-provenance.json",
+    )?)?)
+}
+
+fn json_u64(value: &serde_json::Value, path: &str) -> Result<u64, Box<dyn std::error::Error>> {
+    // protojson encodes int64/uint64 as JSON strings.
+    let raw = value
+        .as_str()
+        .ok_or_else(|| format!("{path} is not a JSON string"))?;
+    Ok(raw.parse::<u64>()?)
+}
+
+#[test]
+fn golden_log_index_differs_from_its_inclusion_proof_index()
+-> Result<(), Box<dyn std::error::Error>> {
+    let golden = golden_fixture_json()?;
+    let entry = &golden["verificationMaterial"]["tlogEntries"][0];
+    let proof = &entry["inclusionProof"];
+
+    let entry_index = json_u64(&entry["logIndex"], "logIndex")?;
+    let proof_index = json_u64(&proof["logIndex"], "inclusionProof.logIndex")?;
+    let tree_size = json_u64(&proof["treeSize"], "inclusionProof.treeSize")?;
+
+    if entry_index == proof_index {
+        return Err(format!(
+            "DESIGN.md \"Rekor-entry <-> bundle binding\" states these are distinct quantities and \
+             that comparing them would reject genuine bundles; this fixture now has both at \
+             {entry_index}, so that passage no longer describes real data"
+        )
+        .into());
+    }
+    // The proof's index is a position within the tree the proof was issued
+    // against, so it must be inside that tree. The entry's own index is a
+    // position in the log as a whole and carries no such relationship --
+    // here it is larger than the tree it was proved against.
+    if proof_index >= tree_size {
+        return Err(format!(
+            "inclusion-proof index {proof_index} is not inside its own tree of size {tree_size}"
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// Half the order of the P-256 base point, big-endian. A signature is
+/// "high-S" when its `s` exceeds this.
+const P256_HALF_ORDER: [u8; 32] = [
+    0x7f, 0xff, 0xff, 0xff, 0x80, 0x00, 0x00, 0x00, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xde, 0x73, 0x7d, 0x56, 0xd3, 0x8b, 0xcf, 0x42, 0x79, 0xdc, 0xe5, 0x61, 0x7e, 0x31, 0x92, 0xa8,
+];
+
+/// Returns `s` from a DER `SEQUENCE { INTEGER r, INTEGER s }`, left-padded
+/// to 32 bytes.
+fn ecdsa_der_s(signature: &[u8]) -> Result<[u8; 32], Box<dyn std::error::Error>> {
+    let mut offset = 0;
+    let mut take = |expected_tag: u8| -> Result<&[u8], Box<dyn std::error::Error>> {
+        let tag = *signature.get(offset).ok_or("truncated DER tag")?;
+        if tag != expected_tag {
+            return Err(format!("expected DER tag {expected_tag:#04x}, found {tag:#04x}").into());
+        }
+        let length = *signature.get(offset + 1).ok_or("truncated DER length")? as usize;
+        if length & 0x80 != 0 {
+            return Err("unexpected long-form DER length in an ECDSA signature".into());
+        }
+        let start = offset + 2;
+        let end = start + length;
+        let body = signature.get(start..end).ok_or("truncated DER value")?;
+        offset = end;
+        Ok(body)
+    };
+
+    let sequence = take(0x30)?.to_vec();
+    let mut inner = 0;
+    let mut integer = |data: &[u8]| -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let tag = *data.get(inner).ok_or("truncated DER integer tag")?;
+        if tag != 0x02 {
+            return Err(format!("expected DER INTEGER, found {tag:#04x}").into());
+        }
+        let length = *data.get(inner + 1).ok_or("truncated DER integer length")? as usize;
+        let start = inner + 2;
+        let end = start + length;
+        let body = data
+            .get(start..end)
+            .ok_or("truncated DER integer")?
+            .to_vec();
+        inner = end;
+        Ok(body)
+    };
+    let _r = integer(&sequence)?;
+    let s = integer(&sequence)?;
+
+    // DER integers are signed, so a leading zero byte may be present.
+    let trimmed = s.strip_prefix(&[0]).unwrap_or(&s);
+    if trimmed.len() > 32 {
+        return Err(format!("s is {} bytes, too large for P-256", trimmed.len()).into());
+    }
+    let mut out = [0u8; 32];
+    out[32 - trimmed.len()..].copy_from_slice(trimmed);
+    Ok(out)
+}
+
+#[test]
+fn every_golden_signature_is_high_s() -> Result<(), Box<dyn std::error::Error>> {
+    let golden = golden_fixture_json()?;
+    let entry = &golden["verificationMaterial"]["tlogEntries"][0];
+
+    let checkpoint_envelope = entry["inclusionProof"]["checkpoint"]["envelope"]
+        .as_str()
+        .ok_or("checkpoint envelope is not a string")?;
+    let checkpoint_line = checkpoint_envelope
+        .lines()
+        .rfind(|line| line.starts_with('\u{2014}'))
+        .ok_or("checkpoint has no signature line")?;
+    let checkpoint_blob = STANDARD.decode(
+        checkpoint_line
+            .rsplit_once(' ')
+            .ok_or("malformed checkpoint signature line")?
+            .1,
+    )?;
+
+    let signatures = [
+        // The 4-byte signed-note key hint precedes the DER signature.
+        ("checkpoint", checkpoint_blob[4..].to_vec()),
+        (
+            "SET",
+            STANDARD.decode(
+                entry["inclusionPromise"]["signedEntryTimestamp"]
+                    .as_str()
+                    .ok_or("SET is not a string")?,
+            )?,
+        ),
+        (
+            "DSSE",
+            STANDARD.decode(
+                golden["dsseEnvelope"]["signatures"][0]["sig"]
+                    .as_str()
+                    .ok_or("DSSE signature is not a string")?,
+            )?,
+        ),
+    ];
+
+    for (label, signature) in signatures {
+        if ecdsa_der_s(&signature)? <= P256_HALF_ORDER {
+            return Err(format!(
+                "the {label} signature is low-S. DESIGN.md \"Testing strategy\" states that every \
+                 signature in this fixture is high-S, and concludes from that low-S must never be \
+                 enforced; that conclusion no longer follows from this fixture"
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
