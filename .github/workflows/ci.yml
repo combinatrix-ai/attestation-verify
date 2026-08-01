@@ -186,6 +186,34 @@ jobs:
       - name: Measure dependency budget
         run: ./scripts/dep-budget.sh
 
+  dep-audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up stable Rust
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master, as of 2026-08-02
+        with:
+          toolchain: stable
+
+      - name: Cache Cargo registry and target
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2, as of 2026-08-02
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@1beb33eee6d086258184383af9a538940be190ed # v2.85.6
+        with:
+          # Pinned to the version deny.toml was written and verified against.
+          # A newer cargo-deny can add checks or change defaults, which would
+          # turn a tool upgrade into an unexplained CI failure.
+          tool: cargo-deny@0.19.6
+
+      # Runs all four checks (advisories, bans, licenses, sources) against
+      # the committed lockfile; see deny.toml for what each one enforces.
+      - name: Audit dependencies
+        run: cargo deny --locked check
+
   msrv:
     name: MSRV (Rust 1.88)
     runs-on: ubuntu-latest
