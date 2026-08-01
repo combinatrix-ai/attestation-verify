@@ -169,11 +169,45 @@ Reject unless ALL hold (Rekor v1): entry signature == the single DSSE
 signature; entry certificate/key == bundle leaf; entry payload hash ==
 decoded DSSE payload hash; entry kind/version in the supported exact set
 (`dsse`/`intoto`, pinned versions); SET canonical body == inclusion-leaf
-body; entry `logIndex` == proof index; proof root/tree size == checkpoint
-root/tree size; `logId` == selected trusted key; checkpoint origin == trusted
-log identity. (Modeled on Cosign GHSA-whqx-f9j3-ch6m, where an unrelated
-valid Rekor entry satisfied verification; regression fixtures reproduce that
-shape.)
+body; proof root/tree size == checkpoint root/tree size; `logId` ==
+selected trusted key; the checkpoint signature's key name and key ID
+identify that selected trusted log instance; checkpoint origin is
+integrity-protected by the verified signature. (Modeled on Cosign
+GHSA-whqx-f9j3-ch6m, where an unrelated valid Rekor entry satisfied
+verification; regression fixtures reproduce that shape.)
+
+**`logIndex` is NOT compared against the inclusion proof's index.** An
+earlier draft required `entry logIndex == proof index`; real bundles
+refute it. The `cli/cli` golden fixture carries `logIndex` 2049189324 and
+`inclusionProof.logIndex` 1927285062 (`treeSize` 1927285185). These are
+different quantities in `sigstore_rekor.proto`: the entry's own
+`logIndex` is its position in the log as a whole, while the proof's is
+the leaf's position within the specific tree the proof was issued
+against. Implementing the equality would reject this genuine bundle and
+any others whose two indices differ.
+
+**Checkpoint signed-note key binding is a live, unimplemented requirement.**
+Sigstore explicitly does not guarantee that `logId` is unique across
+deployments; the verifier must select the `TransparencyLog` instance using
+the signature line's `(key name, key ID)` tuple. For the current public root,
+key-name matching treats a trusted `baseUrl` with one leading `https://` as
+equivalent to its scheme-less form and otherwise compares bytes exactly; it
+does not perform general URL, DNS, case, Unicode, or trailing-slash
+normalization. The expected key ID is `checkpointKeyId`, falling back as the
+TrustedRoot specification requires when that legacy field is absent.
+
+The checkpoint origin is separately integrity-protected because it sits
+inside the signed note body, but it is not an additional exact-match log
+selector. The checkpoint specification only says that the log key name
+SHOULD match the origin, and the real `cli/cli` fixture legitimately carries
+origin `rekor.sigstore.dev - 1193050959916656506`, key name
+`rekor.sigstore.dev`, and trusted `baseUrl` `https://rekor.sigstore.dev`.
+Origin tampering must therefore fail signature verification, while exact
+origin-to-key-name or origin-to-`baseUrl` equality must not be required.
+
+The 4-byte key ID is only a candidate-key prefilter and is public, so an
+attacker can copy it onto every decoy line; `MAX_CHECKPOINT_SIGNATURES`
+remains the hard bound on cryptographic work.
 
 ## X.509 / Fulcio validation profile (normative)
 
@@ -292,10 +326,11 @@ tests on macOS + Linux.
 - Mutation negatives — per chain step AND the cross-binding class:
   unrelated-but-valid Rekor entry/SET (advisory shape); altered unsigned
   `integratedTime`; SET without proof and proof without SET; index/tree-
-  size/root/origin mismatches; wrong log ID; v1/v2 confusion; unsupported
+  size/root mismatches; checkpoint-origin tampering; wrong log ID; wrong
+  checkpoint signature key name/key ID; v1/v2 confusion; unsupported
   kind/version; zero/multiple DSSE signatures; wrong payload type; malformed
-  PAE; high-S ECDSA; untrusted embedded root; reordered chain; CA-constraint
-  and KU/EKU violations; unknown critical extension; SCT wrong issuer/key/
+  PAE; untrusted embedded root; reordered chain; CA-constraint and KU/EKU
+  violations; unknown critical extension; SCT wrong issuer/key/
   altered/out-of-window; cert valid at SCT time but not SET time; duplicate
   or malformed Fulcio extensions; source vs reusable signer-workflow
   confusion; owner/repo rename-recreation-transfer; case normalization;
@@ -303,6 +338,15 @@ tests on macOS + Linux.
   unknown digest; duplicate JSON keys; oversized inputs, deep nesting,
   integer overflow, negative index/time; root rotation and stale-updater
   recovery.
+- **Low-S is not enforced at the three custom P-256 verification sites.**
+  An earlier draft listed "high-S ECDSA" as a mutation negative. The
+  `cli/cli` golden fixture's Rekor checkpoint, SET, and DSSE signatures are
+  all high-S, so enforcing low-S at those sites would reject this genuine
+  bundle. ECDSA malleability does not create an alternate accepted binding
+  here: the DSSE signature bytes are compared against the Rekor entry body
+  byte-for-byte, and that body is Merkle-committed, while the SET and
+  checkpoint signatures are not re-bound anywhere, so re-encoding one
+  gains an attacker nothing.
 - Determinism test: identical results regardless of system clock.
 - Fuzz targets + hard resource limits ship with the first parser; corpus
   maturity grows later.
