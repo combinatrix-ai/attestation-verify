@@ -74,8 +74,15 @@ pub(crate) fn strict_pem(field: &'static str, label: &str, s: &str) -> Result<Ve
 }
 
 /// Rejects `bytes` if it exceeds the crate-wide maximum input size. Must be
-/// the first check performed by every `from_json` / `from_json_lines` /
-/// `from_github_response` entry point, before any parsing work.
+/// the first check performed by every public entry point that takes raw
+/// caller-supplied bytes -- `from_json`, `from_json_lines`,
+/// `from_github_response`, and `Statement::from_payload` -- before any
+/// parsing work.
+///
+/// The rule is "every byte-taking public constructor", not a fixed list of
+/// names: `Statement::from_payload` was originally omitted here precisely
+/// because it did not match the `from_json*` naming, and stayed unbounded
+/// as a result.
 pub(crate) fn check_input_size(bytes: &[u8]) -> Result<(), ResourceLimitError> {
     if bytes.len() > limits::MAX_INPUT_BYTES {
         Err(ResourceLimitError::InputTooLarge {
