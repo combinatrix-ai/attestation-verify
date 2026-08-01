@@ -29,6 +29,9 @@ target/
 !/fuzz/corpus/rekor_body/golden-body.json
 /fuzz/corpus/checkpoint/*
 !/fuzz/corpus/checkpoint/golden-envelope.txt
+/fuzz/corpus/checkpoint_verify/*
+!/fuzz/corpus/checkpoint_verify/golden-envelope.txt
+!/fuzz/corpus/checkpoint_verify/matching-hint-decoys.txt
 /fuzz/corpus/sct/*
 !/fuzz/corpus/sct/golden-list.bin
 /fuzz/corpus/rfc3339/*

@@ -37,6 +37,30 @@ def json_bytes(value: object) -> bytes:
     return (json.dumps(value, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
 
 
+def decoy_padded_envelope(envelope: str) -> str:
+    """Return ``envelope`` with decoy signature lines ahead of the genuine one.
+
+    Each decoy repeats the genuine line's 4-byte key hint, so the key-hint
+    filter cannot discard it, and carries the smallest well-formed DER ECDSA
+    signature -- ``SEQUENCE { INTEGER 1, INTEGER 1 }``. That is the shape
+    that reaches the ECDSA loop at the lowest cost per byte, which is exactly
+    the region ``MAX_CHECKPOINT_SIGNATURES`` bounds. A fuzzer is very
+    unlikely to synthesise a valid key hint on its own, so seeding it is what
+    makes that loop reachable at all.
+    """
+
+    body, _, signatures = envelope.partition("\n\n")
+    if not signatures:
+        raise ValueError("checkpoint envelope has no signature block")
+    genuine = next(line for line in signatures.splitlines() if line.startswith("— "))
+    key_hint = base64.b64decode(genuine.rsplit(" ", 1)[1], validate=True)[:4]
+    decoy = base64.b64encode(key_hint + bytes([0x30, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x01]))
+    # One under the limit, so the seed exercises the loop rather than the
+    # count check the sibling seeds already cover.
+    padding = "".join(f"— decoy {decoy.decode('ascii')}\n" for _ in range(31))
+    return f"{body}\n\n{padding}{signatures}"
+
+
 def read_tlv(data: bytes, offset: int = 0) -> tuple[int, bytes, int]:
     """Read one definite-length DER TLV and return tag, body, next offset."""
 
@@ -168,10 +192,13 @@ def main() -> None:
         "golden-body.json",
         base64.b64decode(tlog_entry["canonicalizedBody"], validate=True),
     )
+    envelope = tlog_entry["inclusionProof"]["checkpoint"]["envelope"]
+    write_seed("checkpoint", "golden-envelope.txt", envelope.encode("utf-8"))
+    write_seed("checkpoint_verify", "golden-envelope.txt", envelope.encode("utf-8"))
     write_seed(
-        "checkpoint",
-        "golden-envelope.txt",
-        tlog_entry["inclusionProof"]["checkpoint"]["envelope"].encode("utf-8"),
+        "checkpoint_verify",
+        "matching-hint-decoys.txt",
+        decoy_padded_envelope(envelope).encode("utf-8"),
     )
 
     certificate_der = base64.b64decode(

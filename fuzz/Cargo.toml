@@ -63,6 +63,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "checkpoint_verify"
+path = "fuzz_targets/checkpoint_verify.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "sct"
 path = "fuzz_targets/sct.rs"
 test = false
