@@ -20,6 +20,23 @@ use spki::DecodePublicKey;
 use crate::bundle::{Certificate, DsseEnvelope};
 use crate::error::{CertificateError, ContentBindingError, Error};
 
+#[cfg(test)]
+std::thread_local! {
+    // Deterministic, per-test-thread work counter for public-path performance
+    // regressions. Thread-local state keeps parallel unit tests independent.
+    static VERIFY_DER_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_verify_der_call_count() {
+    VERIFY_DER_CALLS.set(0);
+}
+
+#[cfg(test)]
+pub(crate) fn verify_der_call_count() -> usize {
+    VERIFY_DER_CALLS.get()
+}
+
 /// DSSE v1 pre-authentication encoding (PAE):
 /// `"DSSEv1" SP len(payloadType) SP payloadType SP len(payload) SP payload`,
 /// where both lengths are ASCII decimal encodings of a *byte* length and
@@ -91,6 +108,9 @@ impl EcdsaVerifyingKey {
     /// "verifies" from "does not," picking their own specific error
     /// variant for the latter.
     pub(crate) fn verify_der(&self, message: &[u8], signature: &[u8]) -> bool {
+        #[cfg(test)]
+        VERIFY_DER_CALLS.set(VERIFY_DER_CALLS.get() + 1);
+
         match self {
             EcdsaVerifyingKey::P256(key) => p256::ecdsa::DerSignature::from_bytes(signature)
                 .is_ok_and(|sig| key.verify(message, &sig).is_ok()),
