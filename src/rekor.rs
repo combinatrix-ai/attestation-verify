@@ -1,7 +1,7 @@
 //! Rekor v1 transparency-log entry verification.
 //!
 //! Pure verification functions implementing `DESIGN.md` "Time-evidence
-//! model" steps 1-5, composed by [`verify_tlog_entry`] and run as step 4
+//! model" steps 1-5, composed by [`verify_tlog_entry`] and run as step 5
 //! of [`crate::Verifier::verify_digest`]'s chain. Every check here is
 //! independently unit-tested; see [`verify_tlog_entry`] for how they
 //! compose.

@@ -162,6 +162,18 @@ pub enum UnsupportedError {
         version: String,
     },
 
+    /// A DSSE envelope's `payloadType` was not the in-toto media type
+    /// (`application/vnd.in-toto+json`). The payload type is covered by
+    /// the PAE signature, so requiring it is what makes a signature over
+    /// some other application's payload type unusable here: without the
+    /// check, an envelope a policy-trusted identity signed under a
+    /// different protocol could be replayed as an in-toto attestation.
+    #[error("unsupported dsse payload type: {found}")]
+    DssePayloadType {
+        /// The `payloadType` string found in the envelope.
+        found: String,
+    },
+
     /// An in-toto statement's `_type` field did not match a statement
     /// version this crate understands.
     #[error("unsupported in-toto statement type: {found}")]

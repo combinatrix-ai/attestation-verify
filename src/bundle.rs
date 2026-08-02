@@ -332,8 +332,11 @@ pub struct DsseEnvelope {
     /// The base64-decoded payload bytes (an in-toto statement, for the
     /// statements this crate understands).
     pub payload: Vec<u8>,
-    /// The payload's media type, e.g. `"application/vnd.in-toto+json"`.
-    /// Not enforced by parsing; kept for callers/logging.
+    /// The payload's media type. Parsing accepts any string by design --
+    /// which type is acceptable is a verification decision, not a shape
+    /// question -- but [`crate::Verifier::verify_digest`] requires
+    /// `"application/vnd.in-toto+json"` before interpreting the payload,
+    /// since the type is covered by the DSSE PAE signature.
     pub payload_type: String,
     /// The envelope's one signature. Bundles with zero or more than one
     /// signature are rejected at parse time

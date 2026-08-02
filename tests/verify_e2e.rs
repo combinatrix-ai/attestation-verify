@@ -407,9 +407,9 @@ fn github_tsa_release_bundle_is_unsupported_predicate_type()
     // `https://in-toto.io/attestation/release/v0.2`, zero tlog entries,
     // RFC 3161 TSA timestamp instead -- v0.2 scope, not verified by this
     // crate. Verifying it must fail deterministically at the
-    // predicate-type allow-list (chain step 2), before subject binding
+    // predicate-type allow-list (chain step 3), before subject binding
     // or the (absent) tlog entry are ever examined -- regardless of
-    // which policy is used, since policy is checked last (step 9).
+    // which policy is used, since policy is checked last (step 10).
     let verifier = verifier_with_correct_policy()?;
     let set = BundleSet::from_json_lines(&read_fixture("github-cli/checksums-gh-download.jsonl")?)?;
     let bundle = set
@@ -434,6 +434,33 @@ fn github_tsa_release_bundle_is_unsupported_predicate_type()
 // ---------------------------------------------------------------------
 // Negatives: each targets one specific chain step.
 // ---------------------------------------------------------------------
+
+#[test]
+fn non_in_toto_dsse_payload_type_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+    // The payload type is covered by the DSSE PAE signature, so an
+    // envelope a trusted identity signed under a different application's
+    // payload type must not be accepted here just because its payload
+    // parses as an in-toto statement (cross-protocol replay).
+    let bundle = bundle_from_mutated_json(|v| {
+        v["dsseEnvelope"]["payloadType"] =
+            serde_json::Value::String("application/vnd.example.other+json".to_owned());
+        Ok(())
+    })?;
+    let verifier = verifier_with_correct_policy()?;
+
+    // Chain step 1 runs before any signature verification, so the
+    // mutation's now-stale DSSE signature cannot be what this fails on.
+    match verifier.verify_digest(&tarball_digest()?, &bundle) {
+        Err(Error::Unsupported(UnsupportedError::DssePayloadType { found })) => {
+            if found == "application/vnd.example.other+json" {
+                Ok(())
+            } else {
+                Err(format!("unexpected payloadType: {found}").into())
+            }
+        }
+        other => Err(format!("expected Unsupported(DssePayloadType), got {other:?}").into()),
+    }
+}
 
 #[test]
 fn wrong_digest_fails_subject_binding() -> Result<(), Box<dyn std::error::Error>> {
@@ -587,8 +614,8 @@ fn tampered_dsse_payload_byte_fails_at_tlog_entry_binding_before_dsse_verify()
     let verifier = verifier_with_correct_policy()?;
 
     // This crate's chain order checks the tlog entry's recorded payload
-    // hash (step 4, `check_entry_binding`) before the DSSE signature
-    // itself (step 6) -- both are `ContentBindingError`, but the specific
+    // hash (step 5, `check_entry_binding`) before the DSSE signature
+    // itself (step 7) -- both are `ContentBindingError`, but the specific
     // variant that fires is `TlogEntryPayloadHashMismatch`, not
     // `DsseSignatureInvalid`: the tampered payload's hash no longer
     // matches the Rekor entry's original, untouched `payloadHash`, and

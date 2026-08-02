@@ -17,9 +17,9 @@
 //! extension) but are outside `DESIGN.md`'s modeled set and tolerated as
 //! unknown, non-critical extensions.
 //!
-//! Run as step 8 of [`crate::Verifier::verify_digest`]'s chain; the
+//! Run as step 9 of [`crate::Verifier::verify_digest`]'s chain; the
 //! resulting [`FulcioClaims`] are matched against a caller's policy by
-//! [`crate::policy_match`] (step 9).
+//! [`crate::policy_match`] (step 10).
 
 use der::Decode;
 use der::asn1::{ObjectIdentifier, Utf8StringRef};

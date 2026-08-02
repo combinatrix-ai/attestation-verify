@@ -2,7 +2,7 @@
 //!
 //! Pure verification functions: PAE (pre-authentication encoding), leaf
 //! `SubjectPublicKeyInfo` extraction from the bundle's leaf certificate,
-//! and ECDSA envelope-signature verification — run as step 6 of
+//! and ECDSA envelope-signature verification — run as step 7 of
 //! [`crate::Verifier::verify_digest`]'s chain, after the leaf's X.509
 //! chain ([`crate::x509`]) has already validated.
 //!
@@ -123,11 +123,11 @@ impl EcdsaVerifyingKey {
 /// A leaf certificate's public key and validity window, extracted from
 /// its DER bytes, independent of chain validation.
 ///
-/// [`crate::rekor`]'s time-window check (chain step 4) reads
+/// [`crate::rekor`]'s time-window check (chain step 5) reads
 /// `not_before`/`not_after` directly from the leaf's own DER, since it
-/// runs *before* the chain is validated (chain step 5,
+/// runs *before* the chain is validated (chain step 6,
 /// [`crate::x509::validate_chain`]) — indeed its output (an authenticated
-/// integrated time) is what step 5 validates the chain *at*. Once the
+/// integrated time) is what step 6 validates the chain *at*. Once the
 /// chain has validated, [`crate::verifier::Verifier::verify_digest`] uses
 /// the chain-validated [`crate::x509::ValidatedLeaf::leaf_spki_der`]
 /// instead of `key` below for DSSE verification, so `key` is exercised
