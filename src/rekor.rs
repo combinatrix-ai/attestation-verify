@@ -271,6 +271,13 @@ fn set_signed_bytes(
 /// `integratedTime` (`DESIGN.md` "Time-evidence model"), so a missing SET
 /// is an error, not a skipped check.
 ///
+/// # Parameters
+///
+/// * `log_key_id` — the SHA-256 of the selected trusted key's SPKI bytes,
+///   recomputed from key material rather than read from any label. This
+///   matches [`select_log_key`]'s hygiene of never trusting the trust
+///   store's own pre-parsed `logId.keyId` label.
+///
 /// # Errors
 ///
 /// Returns [`TransparencyError::SetMissing`] if the entry carries no
@@ -794,7 +801,8 @@ pub(crate) fn verify_tlog_entry(
 
     // 2. SET (inclusion promise).
     let (log, log_key) = select_log_key(trust_store, &tlog_entry.log_id_key_id)?;
-    verify_set(tlog_entry, &log.log_id_key_id, &log_key)?;
+    let selected_key_id: [u8; 32] = Sha256::digest(&log.public_key.raw_bytes).into();
+    verify_set(tlog_entry, &selected_key_id, &log_key)?;
 
     // 3. Merkle inclusion proof.
     let Some(inclusion_proof) = &tlog_entry.inclusion_proof else {
@@ -817,7 +825,6 @@ pub(crate) fn verify_tlog_entry(
     // authenticated under the selected key.  A mutated origin therefore
     // remains `CheckpointSignatureInvalid`, while an authenticated but
     // disallowed origin receives the deliberately opaque mismatch error.
-    let selected_key_id: [u8; 32] = Sha256::digest(&log.public_key.raw_bytes).into();
     if !checkpoint_origin_policy.allows(&selected_key_id, checkpoint.origin) {
         return Err(Error::Transparency(
             TransparencyError::CheckpointOriginMismatch,
@@ -1950,5 +1957,50 @@ mod tests {
             Err(Error::Transparency(TransparencyError::NoTlogEntries)) => Ok(()),
             other => Err(format!("expected NoTlogEntries, got {other:?}").into()),
         }
+    }
+
+    #[test]
+    fn mislabeled_trust_root_key_id_still_verifies_via_recomputed_digest()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // Parse the public-good trust root fixture as JSON.
+        let mut trust_root_value: serde_json::Value =
+            serde_json::from_slice(&read_fixture("trusted-roots/public-good.json")?)?;
+
+        // Find the rekor.sigstore.dev v1 log (baseUrl == "https://rekor.sigstore.dev").
+        let tlog_index = trust_root_value["tlogs"]
+            .as_array()
+            .ok_or("tlogs is not an array")?
+            .iter()
+            .position(|log| {
+                log["baseUrl"]
+                    .as_str()
+                    .is_some_and(|url| url == "https://rekor.sigstore.dev")
+            })
+            .ok_or("rekor.sigstore.dev log not found")?;
+
+        // Replace tlogs[tlog_index].logId.keyId with 32 bytes of 0xAA (base64-encoded).
+        let mislabeled_key_id = STANDARD.encode([0xAAu8; 32]);
+        trust_root_value["tlogs"][tlog_index]["logId"]["keyId"] =
+            serde_json::Value::String(mislabeled_key_id);
+
+        // Build a TrustStore from the mutated root.
+        let mislabeled_trust_store =
+            TrustStore::from_json(&serde_json::to_vec(&trust_root_value)?)?;
+
+        // Verify that verify_tlog_entry still succeeds: select_log_key recomputes the
+        // SHA-256 from the key material itself, not the mislabeled logId.keyId, so the
+        // real golden bundle still verifies. The SET verification uses the recomputed
+        // digest, not the trust store's label.
+        let bundle = real_bundle()?;
+        let result = verify_tlog_entry(
+            &bundle,
+            &mislabeled_trust_store,
+            &fixture_origin_policy(&mislabeled_trust_store)?,
+        )?;
+
+        if result.integrated_time != 1_783_027_755 {
+            return Err(format!("unexpected integratedTime: {}", result.integrated_time).into());
+        }
+        Ok(())
     }
 }
