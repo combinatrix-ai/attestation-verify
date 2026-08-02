@@ -1,7 +1,7 @@
 //! Matches authenticated [`FulcioClaims`] against a caller's
 //! [`GithubPolicy`] (DESIGN.md "Identity policy").
 //!
-//! This is step 9 of [`crate::Verifier::verify_digest`]'s chain, run only
+//! This is step 10 of [`crate::Verifier::verify_digest`]'s chain, run only
 //! after the certificate chain, DSSE signature, and SCT have all already
 //! verified — so every claim read here is authenticated, not
 //! attacker-controlled statement content. Every failure is a distinct,

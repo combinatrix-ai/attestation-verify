@@ -7,7 +7,7 @@
 //! pairing, name chaining, time windows, and the Fulcio leaf/CA
 //! certificate profile. [`crate::sct`] (SCT verification) and
 //! [`crate::fulcio`] (claims extraction) both consume this module's
-//! [`ValidatedLeaf`]. Run as step 5 of
+//! [`ValidatedLeaf`]. Run as step 6 of
 //! [`crate::Verifier::verify_digest`]'s chain, after the transparency-log
 //! entry ([`crate::rekor`]) has already authenticated a signing time.
 

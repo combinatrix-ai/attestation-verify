@@ -7,38 +7,44 @@
 //! ([`GithubPolicy`]) and exact signed-checkpoint origin requirement
 //! ([`CheckpointOriginPolicy`]):
 //!
-//! 1. Parse the signed in-toto statement from the bundle's DSSE payload
+//! 1. Require the DSSE envelope's `payloadType` to be the in-toto media
+//!    type (`application/vnd.in-toto+json`). The payload type is covered
+//!    by the DSSE PAE signature, so this is the type authentication that
+//!    keeps a signature made over some other application's payload type
+//!    from being replayed here as an in-toto attestation
+//!    ([`UnsupportedError::DssePayloadType`]).
+//! 2. Parse the signed in-toto statement from the bundle's DSSE payload
 //!    ([`Bundle::statement`]).
-//! 2. Check the statement's `predicateType` against this crate's
+//! 3. Check the statement's `predicateType` against this crate's
 //!    one-entry allow-list (`https://slsa.dev/provenance/v1`) — anything
 //!    else (including GitHub's own release predicate) is a typed
 //!    [`UnsupportedError::PredicateType`], never best-effort-interpreted.
-//! 3. Bind the requested subject digest to one of the statement's
+//! 4. Bind the requested subject digest to one of the statement's
 //!    subjects (`Statement::find_subject`).
-//! 4. Verify the bundle's transparency-log entry end to end —
+//! 5. Verify the bundle's transparency-log entry end to end —
 //!    canonicalized-body binding, SET, Merkle inclusion proof, checkpoint
 //!    signature, exact checkpoint-origin policy, and time window (this
 //!    crate's internal `rekor` module, DESIGN.md
 //!    "Time-evidence model"). Exactly one entry is required; this is also
 //!    the step that turns `integratedTime` into an *authenticated*
 //!    timestamp, which every later time-window check is measured against.
-//! 5. Validate the leaf certificate's X.509 chain against the trust
+//! 6. Validate the leaf certificate's X.509 chain against the trust
 //!    store at that authenticated time (this crate's internal `x509`
 //!    module). Bundle-supplied roots are never trusted.
-//! 6. Verify the DSSE envelope's signature under the validated leaf's
+//! 7. Verify the DSSE envelope's signature under the validated leaf's
 //!    public key (this crate's internal `dsse` module).
-//! 7. Verify at least one embedded SCT against a trusted CT log (this
+//! 8. Verify at least one embedded SCT against a trusted CT log (this
 //!    crate's internal `sct` module).
-//! 8. Extract the leaf certificate's Fulcio identity claims (this
+//! 9. Extract the leaf certificate's Fulcio identity claims (this
 //!    crate's internal `fulcio` module) — certificate-derived facts, not
 //!    statement content.
-//! 9. Match those claims against the caller's [`GithubPolicy`] (this
-//!    crate's internal `policy_match` module).
-//! 10. Assemble the provenance-separated [`VerificationReport`].
+//! 10. Match those claims against the caller's [`GithubPolicy`] (this
+//!     crate's internal `policy_match` module).
+//! 11. Assemble the provenance-separated [`VerificationReport`].
 //!
-//! Steps 4 and 5 mean a trust store carrying no matching transparency-log
-//! key fails at step 4 ([`crate::error::TransparencyError::UnknownLogKey`])
-//! before the X.509 chain (step 5) is ever examined, even if the chain
+//! Steps 5 and 6 mean a trust store carrying no matching transparency-log
+//! key fails at step 5 ([`crate::error::TransparencyError::UnknownLogKey`])
+//! before the X.509 chain (step 6) is ever examined, even if the chain
 //! itself would also have been untrusted — the two are independent trust
 //! decisions, and this crate reports whichever it checks first, precisely
 //! rather than guessing at which one "really" mattered.
@@ -65,6 +71,11 @@ use crate::x509;
 /// behind the same no-tlog-entries / RFC 3161 TSA path this crate does
 /// not yet implement.
 const SUPPORTED_PREDICATE_TYPE: &str = "https://slsa.dev/provenance/v1";
+
+/// The only DSSE `payloadType` this crate verifies. Required by the
+/// in-toto envelope spec, and covered by the PAE-encoded signature, so
+/// checking it authenticates the payload's *type* and not only its bytes.
+const SUPPORTED_DSSE_PAYLOAD_TYPE: &str = "application/vnd.in-toto+json";
 
 /// Verifies artifact attestations against a trust store and identity
 /// policy.
@@ -96,7 +107,9 @@ impl Verifier {
     /// # Errors
     ///
     /// Returns the first failing step's typed error (see this module's
-    /// docs for the fixed step order): a [`crate::error::ParseError`] or
+    /// docs for the fixed step order):
+    /// [`UnsupportedError::DssePayloadType`] if the DSSE envelope is not
+    /// typed as in-toto JSON; a [`crate::error::ParseError`] or
     /// [`crate::error::UnsupportedError::StatementType`] from
     /// [`Bundle::statement`]; [`UnsupportedError::PredicateType`] if the
     /// predicate type is not on this crate's allow-list;
@@ -112,17 +125,27 @@ impl Verifier {
         subject: &Subject,
         bundle: &Bundle,
     ) -> Result<VerificationReport, Error> {
-        // 1. Parse the signed statement.
+        // 1. DSSE type authentication, before the payload is interpreted
+        // as anything: the payload type is signed, so an envelope typed
+        // for another protocol is not an in-toto attestation even when
+        // its payload happens to parse as a statement.
+        if bundle.dsse_envelope.payload_type != SUPPORTED_DSSE_PAYLOAD_TYPE {
+            return Err(Error::Unsupported(UnsupportedError::DssePayloadType {
+                found: bundle.dsse_envelope.payload_type.clone(),
+            }));
+        }
+
+        // 2. Parse the signed statement.
         let statement = bundle.statement()?;
 
-        // 2. Predicate-type allow-list (v0.1: SLSA provenance v1 only).
+        // 3. Predicate-type allow-list (v0.1: SLSA provenance v1 only).
         if statement.predicate_type != SUPPORTED_PREDICATE_TYPE {
             return Err(Error::Unsupported(UnsupportedError::PredicateType {
                 found: statement.predicate_type.clone(),
             }));
         }
 
-        // 3. Subject binding: `subject` must be among the statement's
+        // 4. Subject binding: `subject` must be among the statement's
         // (signed but not yet authenticated) claimed subjects.
         let matched_name = statement
             .find_subject(subject)
@@ -130,7 +153,7 @@ impl Verifier {
             .name
             .clone();
 
-        // 4. Transparency log: exactly one entry, fully authenticated.
+        // 5. Transparency log: exactly one entry, fully authenticated.
         // This is what makes `integrated_time` usable as authenticated
         // time below (DESIGN.md "Time-evidence model").
         let verified_timestamp =
@@ -142,28 +165,28 @@ impl Verifier {
         let authenticated_time =
             i64::try_from(verified_timestamp.integrated_time).unwrap_or(i64::MAX);
 
-        // 5. X.509 chain, at the authenticated log time. Only
+        // 6. X.509 chain, at the authenticated log time. Only
         // `self.trust_store`'s certificate authorities are ever trusted;
         // a bundle can carry no roots of its own to be trusted instead.
         let leaf_der = &bundle.verification_material.certificate.raw_bytes;
         let validated_leaf = x509::validate_chain(leaf_der, &self.trust_store, authenticated_time)?;
 
-        // 6. DSSE envelope signature, under the validated leaf's key.
+        // 7. DSSE envelope signature, under the validated leaf's key.
         let leaf_key = dsse::EcdsaVerifyingKey::from_spki_der(&validated_leaf.leaf_spki_der)?;
         dsse::verify_envelope(&bundle.dsse_envelope, &leaf_key)?;
 
-        // 7. Certificate Transparency: at least one embedded SCT must
+        // 8. Certificate Transparency: at least one embedded SCT must
         // verify against a trusted CT log.
         sct::verify_embedded_scts(&validated_leaf, &self.trust_store)?;
 
-        // 8. Certificate-derived identity claims (authenticated by the
+        // 9. Certificate-derived identity claims (authenticated by the
         // X.509 chain just validated, not by statement content).
         let claims = fulcio::extract_claims(&validated_leaf)?;
 
-        // 9. Identity policy: the only configurable part of this chain.
+        // 10. Identity policy: the only configurable part of this chain.
         let matched_identity = policy_match::match_policy(&claims, &self.github_policy)?;
 
-        // 10. Assemble the provenance-separated report.
+        // 11. Assemble the provenance-separated report.
         Ok(VerificationReport {
             subject: VerifiedSubject {
                 digest: *subject,
