@@ -170,9 +170,9 @@ signature; entry certificate/key == bundle leaf; entry payload hash ==
 decoded DSSE payload hash; entry kind/version in the supported exact set
 (`dsse`/`intoto`, pinned versions); SET canonical body == inclusion-leaf
 body; proof root/tree size == checkpoint root/tree size; `logId` ==
-selected trusted key; the checkpoint signature's key name and key ID
-identify that selected trusted log instance; checkpoint origin is
-integrity-protected by the verified signature. (Modeled on Cosign
+selected trusted key; the checkpoint signature's key name and key ID are
+used as cheap candidate prefilters before trying that selected key; checkpoint
+origin is integrity-protected by the verified signature. (Modeled on Cosign
 GHSA-whqx-f9j3-ch6m, where an unrelated valid Rekor entry satisfied
 verification; regression fixtures reproduce that shape.)
 
@@ -186,28 +186,33 @@ the leaf's position within the specific tree the proof was issued
 against. Implementing the equality would reject this genuine bundle and
 any others whose two indices differ.
 
-**Checkpoint signed-note key binding is a live, unimplemented requirement.**
-Sigstore explicitly does not guarantee that `logId` is unique across
-deployments; the verifier must select the `TransparencyLog` instance using
-the signature line's `(key name, key ID)` tuple. For the current public root,
-key-name matching treats a trusted `baseUrl` with one leading `https://` as
+**Checkpoint signed-note name and key-ID handling are candidate prefilters,
+not authenticated log binding.** The verifier compares the signature-line
+name against the selected trusted log's `baseUrl` and compares its 4-byte key
+ID hint against the selected key's expected hint before attempting ECDSA.
+For the current public root, name matching treats one leading `https://` as
 equivalent to its scheme-less form and otherwise compares bytes exactly; it
 does not perform general URL, DNS, case, Unicode, or trailing-slash
 normalization. The expected key ID is `checkpointKeyId`, falling back as the
 TrustedRoot specification requires when that legacy field is absent.
 
-The checkpoint origin is separately integrity-protected because it sits
-inside the signed note body, but it is not an additional exact-match log
-selector. The checkpoint specification only says that the log key name
-SHOULD match the origin, and the real `cli/cli` fixture legitimately carries
-origin `rekor.sigstore.dev - 1193050959916656506`, key name
-`rekor.sigstore.dev`, and trusted `baseUrl` `https://rekor.sigstore.dev`.
-Origin tampering must therefore fail signature verification, while exact
-origin-to-key-name or origin-to-`baseUrl` equality must not be required.
+Both values are public, unauthenticated line metadata outside the signed note
+body. They are useful only to avoid cryptographic work on non-matching
+candidates; they do not identify or authenticate a deployment, bind a line to
+the checkpoint origin, or prevent cross-deployment confusion. In particular,
+an otherwise valid signature line can be relabeled with the trusted expected
+name while keeping the same note body, signature bytes, and hint, and then be
+accepted under the already-selected key. The checkpoint origin is separately
+integrity-protected because it sits inside the signed note body. The
+checkpoint specification only says that the key name SHOULD match the origin,
+and the real `cli/cli` fixture carries origin
+`rekor.sigstore.dev - 1193050959916656506`, key name `rekor.sigstore.dev`, and
+trusted `baseUrl` `https://rekor.sigstore.dev`; exact origin-to-key-name or
+origin-to-`baseUrl` equality is intentionally not required in this branch.
+Deployment/origin binding is a separate follow-up.
 
-The 4-byte key ID is only a candidate-key prefilter and is public, so an
-attacker can copy it onto every decoy line; `MAX_CHECKPOINT_SIGNATURES`
-remains the hard bound on cryptographic work.
+The 4-byte key-ID hint is public, so an attacker can copy it onto every decoy
+line; `MAX_CHECKPOINT_SIGNATURES` remains the hard bound on cryptographic work.
 
 ## X.509 / Fulcio validation profile (normative)
 
