@@ -10,13 +10,15 @@ use std::error::Error as StdError;
 use std::process::ExitCode;
 
 use attestation_verify::{
-    BUNDLE_MEDIA_TYPE, Bundle, GithubPolicy, RefPolicy, RepositoryIdentity, SignerPolicy,
-    SourcePolicy, Subject, TrustStore, Verifier, WorkflowPath, WorkflowRevisionPolicy,
+    BUNDLE_MEDIA_TYPE, Bundle, CheckpointOriginPolicy, GithubPolicy, RefPolicy, RepositoryIdentity,
+    SignerPolicy, SourcePolicy, Subject, TrustStore, Verifier, WorkflowPath,
+    WorkflowRevisionPolicy,
 };
 
 const EXPECTED_ISSUER: &str = "https://token.actions.githubusercontent.com";
 const GITHUB_IDENTITY_PREFIX: &str = "https://github.com/";
 const WORKFLOW_PATH_PREFIX: &str = ".github/workflows/";
+const PUBLIC_GOOD_CHECKPOINT_ORIGIN: &str = "rekor.sigstore.dev - 1193050959916656506";
 
 fn main() -> ExitCode {
     match run(std::env::args().skip(1)) {
@@ -129,12 +131,14 @@ fn run_verify(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn StdE
         Some(path) => TrustStore::from_json(&std::fs::read(path)?)?,
         None => TrustStore::embedded_public_good()?,
     };
+    let checkpoint_origin_policy = public_good_origin_policy(&trust_store)?;
     let bundle_bytes = std::fs::read(bundle_path)?;
     reject_unsupported_bundle_shape(&bundle_bytes)?;
     let bundle = Bundle::from_json(&bundle_bytes)?;
     let verifier = Verifier::builder()
         .trust_store(trust_store)
         .github_policy(policy)
+        .checkpoint_origin_policy(checkpoint_origin_policy)
         .build()?;
 
     if let Some(digest) = artifact_or_digest.strip_prefix("sha256:") {
@@ -152,6 +156,22 @@ fn run_verify(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn StdE
 
     println!("verified");
     Ok(())
+}
+
+/// Constructs the conformance client's intentionally narrow public-good
+/// checkpoint-origin policy. The origin is a fixed exact signed-note string;
+/// it is never inferred from `baseUrl`.
+fn public_good_origin_policy(
+    trust_store: &TrustStore,
+) -> Result<CheckpointOriginPolicy, Box<dyn StdError>> {
+    let log = trust_store
+        .tlogs
+        .iter()
+        .find(|log| !log.public_key.key_details.contains("ED25519"))
+        .ok_or("trusted root has no supported Rekor v1 log key")?;
+    Ok(CheckpointOriginPolicy::builder()
+        .allow_origin(log, PUBLIC_GOOD_CHECKPOINT_ORIGIN)?
+        .build()?)
 }
 
 fn reject_unsupported_bundle_shape(bytes: &[u8]) -> Result<(), Box<dyn StdError>> {

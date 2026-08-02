@@ -11,13 +11,15 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 use attestation_verify::{
-    Bundle, BundleSet, ContentBindingError, Error, GithubPolicy, PolicyError, RefPolicy,
-    RepositoryIdentity, SignerPolicy, SourcePolicy, Subject, TransparencyError, TrustStore,
-    UnsupportedError, Verifier, WorkflowPath, WorkflowRevisionPolicy,
+    Bundle, BundleSet, CheckpointOriginPolicy, ContentBindingError, Error, GithubPolicy,
+    PolicyError, RefPolicy, RepositoryIdentity, SignerPolicy, SourcePolicy, Subject,
+    TransparencyError, TrustStore, UnsupportedError, Verifier, WorkflowPath,
+    WorkflowRevisionPolicy,
 };
 
 const GOLDEN_FIXTURE: &str = "github-cli/tarball-user-slsa-provenance.json";
 const TARBALL_DIGEST_FIXTURE: &str = "github-cli/gh_2.96.0_linux_amd64.tar.gz.sha256";
+const REKOR_V1_ORIGIN: &str = "rekor.sigstore.dev - 1193050959916656506";
 
 fn fixture_path(relative: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -86,10 +88,43 @@ fn correct_policy() -> Result<GithubPolicy, Box<dyn std::error::Error>> {
 }
 
 fn verifier_with(policy: GithubPolicy) -> Result<Verifier, Box<dyn std::error::Error>> {
+    let trust_store = TrustStore::embedded_public_good()?;
+    let checkpoint_origin_policy = origin_policy(&trust_store, &[REKOR_V1_ORIGIN])?;
+    verifier_with_origin_policy(policy, trust_store, checkpoint_origin_policy)
+}
+
+fn verifier_with_origin_policy(
+    policy: GithubPolicy,
+    trust_store: TrustStore,
+    checkpoint_origin_policy: CheckpointOriginPolicy,
+) -> Result<Verifier, Box<dyn std::error::Error>> {
     Ok(Verifier::builder()
-        .trust_store(TrustStore::embedded_public_good()?)
+        .trust_store(trust_store)
         .github_policy(policy)
+        .checkpoint_origin_policy(checkpoint_origin_policy)
         .build()?)
+}
+
+fn origin_policy(
+    trust_store: &TrustStore,
+    origins: &[&str],
+) -> Result<CheckpointOriginPolicy, Box<dyn std::error::Error>> {
+    let log = trust_store
+        .tlogs
+        .first()
+        .ok_or("missing trusted Rekor log")?;
+    origin_policy_for_log(log, origins)
+}
+
+fn origin_policy_for_log(
+    log: &attestation_verify::TransparencyLog,
+    origins: &[&str],
+) -> Result<CheckpointOriginPolicy, Box<dyn std::error::Error>> {
+    let mut builder = CheckpointOriginPolicy::builder();
+    for origin in origins {
+        builder = builder.allow_origin(log, *origin)?;
+    }
+    Ok(builder.build()?)
 }
 
 fn verifier_with_correct_policy() -> Result<Verifier, Box<dyn std::error::Error>> {
@@ -241,6 +276,122 @@ fn verifies_real_cli_cli_bundle_with_every_report_field_exact()
     }
 
     Ok(())
+}
+
+#[test]
+fn wrong_full_checkpoint_origin_is_an_authenticated_policy_mismatch()
+-> Result<(), Box<dyn std::error::Error>> {
+    let trust_store = TrustStore::embedded_public_good()?;
+    let origin_policy = origin_policy(&trust_store, &["rekor.sigstore.dev - 1"])?;
+    let verifier = verifier_with_origin_policy(correct_policy()?, trust_store, origin_policy)?;
+
+    match verifier.verify_digest(&tarball_digest()?, &real_bundle()?) {
+        Err(Error::Transparency(TransparencyError::CheckpointOriginMismatch)) => Ok(()),
+        other => Err(format!("expected CheckpointOriginMismatch, got {other:?}").into()),
+    }
+}
+
+#[test]
+fn host_only_checkpoint_origin_is_not_normalized_or_accepted()
+-> Result<(), Box<dyn std::error::Error>> {
+    let trust_store = TrustStore::embedded_public_good()?;
+    let origin_policy = origin_policy(&trust_store, &["rekor.sigstore.dev"])?;
+    let verifier = verifier_with_origin_policy(correct_policy()?, trust_store, origin_policy)?;
+
+    match verifier.verify_digest(&tarball_digest()?, &real_bundle()?) {
+        Err(Error::Transparency(TransparencyError::CheckpointOriginMismatch)) => Ok(()),
+        other => Err(format!("expected CheckpointOriginMismatch, got {other:?}").into()),
+    }
+}
+
+#[test]
+fn multiple_allowed_origins_for_one_key_are_supported() -> Result<(), Box<dyn std::error::Error>> {
+    let trust_store = TrustStore::embedded_public_good()?;
+    let origin_policy = origin_policy(&trust_store, &["unused alternate origin", REKOR_V1_ORIGIN])?;
+    let verifier = verifier_with_origin_policy(correct_policy()?, trust_store, origin_policy)?;
+    verifier.verify_digest(&tarball_digest()?, &real_bundle()?)?;
+    Ok(())
+}
+
+#[test]
+fn base_url_mutation_does_not_change_authenticated_origin_acceptance()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut trust_root: serde_json::Value =
+        serde_json::from_slice(&read_fixture("trusted-roots/public-good.json")?)?;
+    trust_root["tlogs"][0]["baseUrl"] =
+        serde_json::Value::String("https://attacker-controlled.invalid/not-normative".to_owned());
+    let trust_store = TrustStore::from_json(&serde_json::to_vec(&trust_root)?)?;
+    let checkpoint_origin_policy = origin_policy(&trust_store, &[REKOR_V1_ORIGIN])?;
+    let verifier =
+        verifier_with_origin_policy(correct_policy()?, trust_store, checkpoint_origin_policy)?;
+    verifier.verify_digest(&tarball_digest()?, &real_bundle()?)?;
+    Ok(())
+}
+
+#[test]
+fn authenticated_origin_bound_to_wrong_known_log_key_is_rejected()
+-> Result<(), Box<dyn std::error::Error>> {
+    let trust_store = TrustStore::embedded_public_good()?;
+    let checkpoint_origin_policy =
+        origin_policy_for_log(&trust_store.tlogs[1], &[REKOR_V1_ORIGIN])?;
+    let verifier =
+        verifier_with_origin_policy(correct_policy()?, trust_store, checkpoint_origin_policy)?;
+
+    match verifier.verify_digest(&tarball_digest()?, &real_bundle()?) {
+        Err(Error::Transparency(TransparencyError::CheckpointOriginMismatch)) => Ok(()),
+        other => Err(format!("expected CheckpointOriginMismatch, got {other:?}").into()),
+    }
+}
+
+#[test]
+fn mutating_signed_checkpoint_origin_stays_signature_invalid()
+-> Result<(), Box<dyn std::error::Error>> {
+    let bundle = bundle_from_mutated_json(|value| {
+        let envelope = value["verificationMaterial"]["tlogEntries"][0]["inclusionProof"]
+            ["checkpoint"]["envelope"]
+            .as_str()
+            .ok_or("missing checkpoint envelope")?;
+        let (_origin, remainder) = envelope.split_once('\n').ok_or("missing origin line")?;
+        value["verificationMaterial"]["tlogEntries"][0]["inclusionProof"]["checkpoint"]["envelope"] =
+            serde_json::Value::String(format!("tampered-origin\n{remainder}"));
+        Ok(())
+    })?;
+    let verifier = verifier_with_correct_policy()?;
+
+    match verifier.verify_digest(&tarball_digest()?, &bundle) {
+        Err(Error::Transparency(TransparencyError::CheckpointSignatureInvalid)) => Ok(()),
+        other => Err(format!("expected CheckpointSignatureInvalid, got {other:?}").into()),
+    }
+}
+
+#[test]
+fn missing_checkpoint_origin_policy_fails_verifier_build() -> Result<(), Box<dyn std::error::Error>>
+{
+    match Verifier::builder()
+        .trust_store(TrustStore::embedded_public_good()?)
+        .github_policy(correct_policy()?)
+        .build()
+    {
+        Err(Error::Policy(PolicyError::InvalidConfiguration(_))) => Ok(()),
+        other => Err(format!("expected missing-origin-policy build error, got {other:?}").into()),
+    }
+}
+
+#[test]
+fn unknown_checkpoint_origin_policy_key_fails_verifier_build()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut trust_store = TrustStore::embedded_public_good()?;
+    let unknown_log = trust_store.tlogs.remove(0);
+    let checkpoint_origin_policy = origin_policy_for_log(&unknown_log, &[REKOR_V1_ORIGIN])?;
+    match Verifier::builder()
+        .trust_store(trust_store)
+        .github_policy(correct_policy()?)
+        .checkpoint_origin_policy(checkpoint_origin_policy)
+        .build()
+    {
+        Err(Error::Policy(PolicyError::InvalidConfiguration(_))) => Ok(()),
+        other => Err(format!("expected unknown-origin-key build error, got {other:?}").into()),
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -468,28 +619,24 @@ fn altered_integrated_time_fails_set_verification() -> Result<(), Box<dyn std::e
 }
 
 #[test]
-fn github_root_as_only_trust_store_fails_at_unknown_log_before_chain_is_examined()
--> Result<(), Box<dyn std::error::Error>> {
-    // `trusted-roots/github.json` carries zero transparency logs
-    // (confirmed by `parse_fixtures.rs`'s own `github_trust_root_parses`
-    // test). This crate's chain order runs transparency-log verification
-    // (step 4) *before* X.509 chain validation (step 5), so verifying the
-    // real (public-good-issued) bundle against this root fails with
-    // `Transparency(UnknownLogKey)` at step 4 -- even though the chain
-    // would also have been untrusted against this root at step 5, that
-    // step is never reached. This is the concrete consequence of this
-    // crate's fixed chain order, not an arbitrary choice between the two:
-    // whichever independent trust decision is checked first is the one
-    // that is reported.
+fn zero_tlog_trust_store_fails_origin_policy_build() -> Result<(), Box<dyn std::error::Error>> {
+    // `trusted-roots/github.json` carries zero transparency logs. A
+    // non-empty checkpoint-origin policy cannot name a key in that root, so
+    // the new fail-fast builder contract rejects this configuration before
+    // any bundle verification starts.
+    let public_good = TrustStore::embedded_public_good()?;
+    let checkpoint_origin_policy =
+        origin_policy_for_log(&public_good.tlogs[0], &[REKOR_V1_ORIGIN])?;
     let verifier = Verifier::builder()
         .trust_store(TrustStore::from_json(&read_fixture(
             "trusted-roots/github.json",
         )?)?)
         .github_policy(correct_policy()?)
-        .build()?;
+        .checkpoint_origin_policy(checkpoint_origin_policy)
+        .build();
 
-    match verifier.verify_digest(&tarball_digest()?, &real_bundle()?) {
-        Err(Error::Transparency(TransparencyError::UnknownLogKey)) => Ok(()),
-        other => Err(format!("expected Transparency(UnknownLogKey), got {other:?}").into()),
+    match verifier {
+        Err(Error::Policy(PolicyError::InvalidConfiguration(_))) => Ok(()),
+        other => Err(format!("expected policy build failure, got {other:?}").into()),
     }
 }

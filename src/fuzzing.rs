@@ -4,6 +4,11 @@
 //! entry points. They are hidden from normal generated documentation and are
 //! not compiled unless the `fuzzing` feature is selected; the default library
 //! API and dependency graph are unchanged.
+//!
+//! The checkpoint-signature adapter intentionally exercises the internal
+//! cryptographic path without a public [`Verifier`] policy: fuzzing needs to
+//! reach signature parsing and verification for arbitrary envelopes, while
+//! every normal verification still requires `CheckpointOriginPolicy`.
 
 use crate::error::Error;
 

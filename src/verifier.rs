@@ -3,9 +3,9 @@
 //! [`Verifier::verify_digest`] runs the full offline verification chain
 //! (DESIGN.md "Verification chain") in a fixed order, each step surfacing
 //! its own typed error the moment it fails — there is no step this crate
-//! treats as optional, and nothing here is configurable except *what
-//! identity to require* ([`GithubPolicy`], via this crate's internal
-//! `policy_match` module):
+//! treats as optional.  The caller supplies the identity requirement
+//! ([`GithubPolicy`]) and exact signed-checkpoint origin requirement
+//! ([`CheckpointOriginPolicy`]):
 //!
 //! 1. Parse the signed in-toto statement from the bundle's DSSE payload
 //!    ([`Bundle::statement`]).
@@ -16,8 +16,9 @@
 //! 3. Bind the requested subject digest to one of the statement's
 //!    subjects (`Statement::find_subject`).
 //! 4. Verify the bundle's transparency-log entry end to end —
-//!    canonicalized-body binding, SET, Merkle inclusion proof, checkpoint,
-//!    and time window (this crate's internal `rekor` module, DESIGN.md
+//!    canonicalized-body binding, SET, Merkle inclusion proof, checkpoint
+//!    signature, exact checkpoint-origin policy, and time window (this
+//!    crate's internal `rekor` module, DESIGN.md
 //!    "Time-evidence model"). Exactly one entry is required; this is also
 //!    the step that turns `integratedTime` into an *authenticated*
 //!    timestamp, which every later time-window check is measured against.
@@ -50,7 +51,7 @@ use crate::bundle::Bundle;
 use crate::dsse;
 use crate::error::{ContentBindingError, Error, PolicyError, UnsupportedError};
 use crate::fulcio;
-use crate::policy::GithubPolicy;
+use crate::policy::{CheckpointOriginPolicy, GithubPolicy};
 use crate::policy_match;
 use crate::rekor;
 use crate::sct;
@@ -75,6 +76,7 @@ const SUPPORTED_PREDICATE_TYPE: &str = "https://slsa.dev/provenance/v1";
 pub struct Verifier {
     trust_store: TrustStore,
     github_policy: GithubPolicy,
+    checkpoint_origin_policy: CheckpointOriginPolicy,
 }
 
 impl Verifier {
@@ -131,7 +133,8 @@ impl Verifier {
         // 4. Transparency log: exactly one entry, fully authenticated.
         // This is what makes `integrated_time` usable as authenticated
         // time below (DESIGN.md "Time-evidence model").
-        let verified_timestamp = rekor::verify_tlog_entry(bundle, &self.trust_store)?;
+        let verified_timestamp =
+            rekor::verify_tlog_entry(bundle, &self.trust_store, &self.checkpoint_origin_policy)?;
         // `integrated_time` is unix seconds; the saturating conversion
         // mirrors `crate::dsse::unix_seconds`'s handling of the same
         // practically-unreachable overflow (X.509 / Rekor times never
@@ -205,6 +208,7 @@ impl Verifier {
 pub struct VerifierBuilder {
     trust_store: Option<TrustStore>,
     github_policy: Option<GithubPolicy>,
+    checkpoint_origin_policy: Option<CheckpointOriginPolicy>,
 }
 
 impl VerifierBuilder {
@@ -223,13 +227,25 @@ impl VerifierBuilder {
         self
     }
 
+    /// Sets the exact signed checkpoint origins allowed for each trusted
+    /// Rekor log-key SPKI digest.
+    #[must_use]
+    pub fn checkpoint_origin_policy(
+        mut self,
+        checkpoint_origin_policy: CheckpointOriginPolicy,
+    ) -> Self {
+        self.checkpoint_origin_policy = Some(checkpoint_origin_policy);
+        self
+    }
+
     /// Builds the verifier.
     ///
     /// # Errors
     ///
     /// Returns [`PolicyError::InvalidConfiguration`] if either
-    /// [`VerifierBuilder::trust_store`] or [`VerifierBuilder::github_policy`]
-    /// was never called.
+    /// [`VerifierBuilder::trust_store`], [`VerifierBuilder::github_policy`],
+    /// or [`VerifierBuilder::checkpoint_origin_policy`] was never called,
+    /// or a policy key does not exist in the chosen trust store.
     pub fn build(self) -> Result<Verifier, Error> {
         let trust_store = self.trust_store.ok_or_else(|| {
             Error::Policy(PolicyError::InvalidConfiguration(
@@ -241,11 +257,34 @@ impl VerifierBuilder {
                 "github_policy is required".to_owned(),
             ))
         })?;
+        let checkpoint_origin_policy = self.checkpoint_origin_policy.ok_or_else(|| {
+            Error::Policy(PolicyError::InvalidConfiguration(
+                "checkpoint_origin_policy is required".to_owned(),
+            ))
+        })?;
+        for binding in checkpoint_origin_policy.bindings() {
+            let known_key = trust_store
+                .tlogs
+                .iter()
+                .any(|log| sha256_spki(&log.public_key.raw_bytes) == binding.key_id());
+            if !known_key {
+                return Err(Error::Policy(PolicyError::InvalidConfiguration(
+                    "checkpoint origin policy references unknown trust-store log key".to_owned(),
+                )));
+            }
+        }
         Ok(Verifier {
             trust_store,
             github_policy,
+            checkpoint_origin_policy,
         })
     }
+}
+
+fn sha256_spki(raw_spki: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+
+    Sha256::digest(raw_spki).into()
 }
 
 /// The result of a successful verification, split by provenance

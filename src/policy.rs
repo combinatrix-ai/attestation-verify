@@ -9,9 +9,243 @@
 
 use crate::error::{Error, PolicyError};
 use crate::parse_util;
+use crate::trust::TransparencyLog;
 
 fn policy_error(reason: String) -> Error {
     Error::Policy(PolicyError::InvalidConfiguration(reason))
+}
+
+/// The exact signed checkpoint-origin strings accepted for a trusted Rekor
+/// signing key.
+///
+/// A checkpoint origin is part of the signed-note body, but it is not a
+/// useful deployment identity until the note signature has been authenticated
+/// under a caller-selected trusted key.  This policy therefore binds opaque,
+/// byte-for-byte origin strings to the SHA-256 digest of the selected log
+/// key's raw `SubjectPublicKeyInfo` bytes.  It is deliberately separate from
+/// [`crate::trust::TrustStore`]: trust roots describe which keys are trusted,
+/// while this type describes which deployment origins a caller accepts for
+/// those keys.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckpointOriginPolicy {
+    bindings: Vec<CheckpointOriginBinding>,
+}
+
+/// One log-key identity and the exact checkpoint origins allowed for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckpointOriginBinding {
+    key_id: [u8; 32],
+    origins: Vec<String>,
+}
+
+impl CheckpointOriginBinding {
+    /// Creates a binding from a trusted log and one or more exact origin
+    /// strings. The key identity is derived internally as
+    /// SHA-256(SPKI/raw public-key bytes).
+    ///
+    /// Empty origins and origins containing CR/LF are rejected.  Origins are
+    /// otherwise opaque: no URL, case, Unicode, or whitespace normalization
+    /// is performed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PolicyError::InvalidConfiguration`] for an empty origin
+    /// list, an empty origin, or an origin containing CR/LF.
+    pub fn new<I, S>(log: &TransparencyLog, origins: I) -> Result<Self, Error>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let origins = validate_checkpoint_origins(origins)?;
+        Ok(Self {
+            key_id: checkpoint_log_key_id(log),
+            origins,
+        })
+    }
+
+    /// The SHA-256 digest of the selected key's raw SPKI bytes.
+    #[must_use]
+    pub(crate) fn key_id(&self) -> [u8; 32] {
+        self.key_id
+    }
+
+    /// The exact allowed origin strings.
+    #[must_use]
+    pub fn origins(&self) -> &[String] {
+        &self.origins
+    }
+}
+
+impl CheckpointOriginPolicy {
+    /// Creates a checkpoint-origin policy from key-to-origin bindings.
+    ///
+    /// The policy must contain at least one binding, and every binding must
+    /// contain at least one valid origin.  Duplicate key bindings are allowed
+    /// and are evaluated as a union; this keeps construction deterministic
+    /// while allowing callers to assemble policy fragments independently.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PolicyError::InvalidConfiguration`] when no bindings are
+    /// supplied.
+    pub fn new<I>(bindings: I) -> Result<Self, Error>
+    where
+        I: IntoIterator<Item = CheckpointOriginBinding>,
+    {
+        let bindings = bindings.into_iter().collect::<Vec<_>>();
+        if bindings.is_empty() {
+            return Err(policy_error(
+                "checkpoint origin policy must not be empty".to_owned(),
+            ));
+        }
+        Ok(Self { bindings })
+    }
+
+    /// Creates a policy containing one trusted log-key binding.
+    ///
+    /// This is a convenience for the common one-log deployment; use
+    /// [`CheckpointOriginPolicyBuilder`] when several keys or origins are
+    /// needed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PolicyError::InvalidConfiguration`] for an empty origin
+    /// list, an empty origin, or an origin containing CR/LF.
+    pub fn for_log<I, S>(log: &TransparencyLog, origins: I) -> Result<Self, Error>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self::new([CheckpointOriginBinding::new(log, origins)?])
+    }
+
+    /// Starts building a checkpoint-origin policy.
+    #[must_use]
+    pub fn builder() -> CheckpointOriginPolicyBuilder {
+        CheckpointOriginPolicyBuilder::default()
+    }
+
+    /// Returns the policy bindings.
+    #[must_use]
+    pub(crate) fn bindings(&self) -> &[CheckpointOriginBinding] {
+        &self.bindings
+    }
+
+    /// Returns whether `origin` is allowed for the selected SPKI digest.
+    #[must_use]
+    pub(crate) fn allows(&self, key_id: &[u8; 32], origin: &str) -> bool {
+        self.bindings
+            .iter()
+            .filter(|binding| &binding.key_id == key_id)
+            .any(|binding| binding.origins.iter().any(|allowed| allowed == origin))
+    }
+}
+
+/// Builder for [`CheckpointOriginPolicy`].
+#[derive(Debug, Clone, Default)]
+pub struct CheckpointOriginPolicyBuilder {
+    bindings: Vec<CheckpointOriginBinding>,
+}
+
+impl CheckpointOriginPolicyBuilder {
+    /// Adds one key-to-origin binding.
+    #[must_use]
+    pub fn binding(mut self, binding: CheckpointOriginBinding) -> Self {
+        self.bindings.push(binding);
+        self
+    }
+
+    /// Adds one exact origin for a key.  Validation runs when this method is
+    /// called, so malformed origins cannot enter a builder.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PolicyError::InvalidConfiguration`] for an empty origin or
+    /// an origin containing CR/LF.
+    pub fn allow_origin(
+        mut self,
+        log: &TransparencyLog,
+        origin: impl Into<String>,
+    ) -> Result<Self, Error> {
+        let key_id = checkpoint_log_key_id(log);
+        let origin = validate_checkpoint_origin(origin.into())?;
+        if let Some(binding) = self.bindings.iter_mut().find(|b| b.key_id == key_id) {
+            if !binding.origins.contains(&origin) {
+                binding.origins.push(origin);
+            }
+        } else {
+            self.bindings.push(CheckpointOriginBinding {
+                key_id,
+                origins: vec![origin],
+            });
+        }
+        Ok(self)
+    }
+
+    /// Adds several exact origins for one log key.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PolicyError::InvalidConfiguration`] if any origin is empty
+    /// or contains CR/LF.
+    pub fn allow_origins<I, S>(mut self, log: &TransparencyLog, origins: I) -> Result<Self, Error>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        for origin in origins {
+            self = self.allow_origin(log, origin)?;
+        }
+        Ok(self)
+    }
+
+    /// Builds the policy, rejecting an empty policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PolicyError::InvalidConfiguration`] when no bindings were
+    /// added.
+    pub fn build(self) -> Result<CheckpointOriginPolicy, Error> {
+        CheckpointOriginPolicy::new(self.bindings)
+    }
+}
+
+fn checkpoint_log_key_id(log: &TransparencyLog) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+
+    Sha256::digest(&log.public_key.raw_bytes).into()
+}
+
+fn validate_checkpoint_origins<I, S>(origins: I) -> Result<Vec<String>, Error>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    let origins = origins
+        .into_iter()
+        .map(Into::into)
+        .map(validate_checkpoint_origin)
+        .collect::<Result<Vec<_>, _>>()?;
+    if origins.is_empty() {
+        return Err(policy_error(
+            "checkpoint origin binding must contain at least one origin".to_owned(),
+        ));
+    }
+    Ok(origins)
+}
+
+fn validate_checkpoint_origin(origin: String) -> Result<String, Error> {
+    if origin.is_empty() {
+        return Err(policy_error(
+            "checkpoint origin must not be empty".to_owned(),
+        ));
+    }
+    if origin.contains(['\r', '\n']) {
+        return Err(policy_error(
+            "checkpoint origin must not contain CR or LF".to_owned(),
+        ));
+    }
+    Ok(origin)
 }
 
 /// A GitHub identity policy: the source repository/ref/commit an artifact
@@ -288,9 +522,30 @@ pub enum WorkflowRevisionPolicy {
 
 #[cfg(test)]
 mod tests {
-    use super::{GithubPolicy, RepositoryIdentity, SignerPolicy, SourcePolicy, WorkflowPath};
+    use super::{
+        CheckpointOriginPolicy, GithubPolicy, RepositoryIdentity, SignerPolicy, SourcePolicy,
+        WorkflowPath,
+    };
     use super::{RefPolicy, WorkflowRevisionPolicy};
     use crate::error::{Error, PolicyError};
+    use crate::trust::{PublicKey, TransparencyLog, ValidityPeriod};
+
+    fn synthetic_log() -> TransparencyLog {
+        TransparencyLog {
+            base_url: "https://example.test".to_owned(),
+            hash_algorithm: "SHA2_256".to_owned(),
+            public_key: PublicKey {
+                raw_bytes: vec![1, 2, 3],
+                key_details: "PKIX_ECDSA_P256_SHA_256".to_owned(),
+                valid_for: ValidityPeriod {
+                    start: 0,
+                    end: None,
+                },
+            },
+            log_id_key_id: vec![],
+            checkpoint_key_id: None,
+        }
+    }
 
     #[test]
     fn repository_identity_parses_owner_slash_name() -> Result<(), Box<dyn std::error::Error>> {
@@ -381,6 +636,23 @@ mod tests {
             .signer(signer)
             .build()?;
         Ok(())
+    }
+
+    #[test]
+    fn checkpoint_origin_policy_requires_a_binding() -> Result<(), Box<dyn std::error::Error>> {
+        expect_policy_error(CheckpointOriginPolicy::builder().build())
+    }
+
+    #[test]
+    fn checkpoint_origin_policy_rejects_empty_origin() -> Result<(), Box<dyn std::error::Error>> {
+        let log = synthetic_log();
+        expect_policy_error(CheckpointOriginPolicy::builder().allow_origin(&log, ""))
+    }
+
+    #[test]
+    fn checkpoint_origin_policy_rejects_cr_lf_origin() -> Result<(), Box<dyn std::error::Error>> {
+        let log = synthetic_log();
+        expect_policy_error(CheckpointOriginPolicy::builder().allow_origin(&log, "rekor\nattacker"))
     }
 
     fn expect_policy_error<T: std::fmt::Debug>(
