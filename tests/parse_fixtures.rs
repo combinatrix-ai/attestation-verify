@@ -439,6 +439,31 @@ fn rejects_oversized_github_response_input() -> Result<(), Box<dyn std::error::E
 }
 
 #[test]
+fn rejects_bundle_with_oversized_ignored_json_array() -> Result<(), Box<dyn std::error::Error>> {
+    // Unknown fields are tolerated by design, so an ignored array is enough
+    // to blow up the parsed `Value` tree on an otherwise valid bundle while
+    // staying far under the input-byte limit.
+    let bytes = read_fixture("github-cli/tarball-user-slsa-provenance.json")?;
+    let mut value: serde_json::Value = serde_json::from_slice(&bytes)?;
+    let Some(object) = value.as_object_mut() else {
+        return Err("expected the fixture to be a JSON object".into());
+    };
+    object.insert(
+        "junk".to_owned(),
+        serde_json::Value::Array(vec![serde_json::Value::from(0); 300_000]),
+    );
+    let mutated = serde_json::to_vec(&value)?;
+    if mutated.len() >= 8 * 1024 * 1024 {
+        return Err("mutated bundle should stay under the input-byte limit".into());
+    }
+
+    match Bundle::from_json(&mutated) {
+        Err(Error::ResourceLimit(ResourceLimitError::TooManyJsonNodes { .. })) => Ok(()),
+        other => Err(format!("expected TooManyJsonNodes error, got {other:?}").into()),
+    }
+}
+
+#[test]
 fn subject_from_digest_hex_rejects_63_65_and_non_hex() -> Result<(), Box<dyn std::error::Error>> {
     for candidate in ["a".repeat(63), "a".repeat(65), "z".repeat(64)] {
         match Subject::from_digest_hex(&candidate) {
