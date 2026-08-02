@@ -1,0 +1,69 @@
+name: Publish crate
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to publish, without the v prefix
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish:
+    name: Publish attestation-verify
+    runs-on: ubuntu-latest
+    environment: crates-io
+    steps:
+      - name: Check out the selected tag
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up stable Rust
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master, as of 2026-08-02
+        with:
+          toolchain: stable
+
+      - name: Validate tag and package version
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          [[ "${RELEASE_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]] || {
+            echo "invalid release version: ${RELEASE_VERSION}" >&2
+            exit 1
+          }
+          test "${GITHUB_REF_TYPE}" = tag || {
+            echo "run this workflow against tag v${RELEASE_VERSION}, not ${GITHUB_REF}" >&2
+            exit 1
+          }
+          test "${GITHUB_REF_NAME}" = "v${RELEASE_VERSION}" || {
+            echo "selected tag ${GITHUB_REF_NAME} does not match v${RELEASE_VERSION}" >&2
+            exit 1
+          }
+          package_version="$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "attestation-verify") | .version')"
+          test "${package_version}" = "${RELEASE_VERSION}" || {
+            echo "Cargo package version ${package_version} does not match ${RELEASE_VERSION}" >&2
+            exit 1
+          }
+
+      - name: Test the locked release source
+        run: cargo test --locked
+
+      - name: Verify the package without uploading
+        run: cargo publish --dry-run --locked
+
+      # Bootstrap only: crates.io requires the first version of a new crate to
+      # use an API token. After 0.1.0 exists, register this workflow and the
+      # crates-io environment as a Trusted Publisher, replace this step's
+      # secret with rust-lang/crates-io-auth-action, and delete the secret.
+      - name: Publish to crates.io
+        run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}

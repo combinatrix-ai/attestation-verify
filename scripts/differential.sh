@@ -25,6 +25,8 @@ BUNDLE_FIXTURE="tests/fixtures/github-cli/tarball-user-slsa-provenance.json"
 SIGNER_WORKFLOW=".github/workflows/deployment.yml"
 OWNER_ID="59704711"
 REPOSITORY_ID="212613049"
+SOURCE_REF="refs/heads/trunk"
+CHECKPOINT_ORIGIN="rekor.sigstore.dev - 1193050959916656506"
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/.." && pwd)"
@@ -58,13 +60,15 @@ run_gh_verify() {
 
 run_example_verify() {
     (
-        cd "$repo_root" && cargo run --quiet --example verify -- \
+        cd "$repo_root" && cargo run --quiet --locked --example verify -- \
             --artifact "$1" \
             --bundle "$BUNDLE_FIXTURE" \
             --repo "$REPO" \
             --owner-id "$OWNER_ID" \
             --repo-id "$REPOSITORY_ID" \
-            --signer-workflow "$SIGNER_WORKFLOW"
+            --source-ref "$SOURCE_REF" \
+            --signer-workflow "$SIGNER_WORKFLOW" \
+            --checkpoint-origin "$CHECKPOINT_ORIGIN"
     )
 }
 

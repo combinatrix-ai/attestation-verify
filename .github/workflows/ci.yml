@@ -29,10 +29,10 @@ jobs:
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2, as of 2026-08-02
 
       - name: Check formatting
-        run: cargo fmt --check
+        run: cargo fmt --all --check
 
       - name: Run Clippy with warnings denied
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Build documentation with warnings denied
         env:
@@ -41,6 +41,9 @@ jobs:
 
       - name: Run tests
         run: cargo test --locked
+
+      - name: Verify the crates.io package
+        run: cargo package --locked
 
   test:
     name: Native cryptographic fixture tests (${{ matrix.os }})
@@ -232,7 +235,7 @@ jobs:
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2, as of 2026-08-02
 
       - name: Check library with MSRV
-        run: cargo check --locked
+        run: cargo check --locked --workspace
 
       - name: Check examples with MSRV
         run: cargo check --locked --examples
@@ -253,7 +256,7 @@ jobs:
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2, as of 2026-08-02
 
       - name: Build conformance client
-        run: cargo build --locked --release --bin conformance
+        run: cargo build --locked --release --package attestation-verify-conformance
 
       - name: Validate expected-failure manifest
         id: conformance-xfails
@@ -282,7 +285,7 @@ jobs:
       - name: Run official Sigstore conformance suite
         uses: sigstore/sigstore-conformance@f12aa02f4a6e5a9e84bcc3c10c193b14ab04da9d
         with:
-          entrypoint: ${{ github.workspace }}/target/release/conformance
+          entrypoint: ${{ github.workspace }}/target/release/attestation-verify-conformance
           skip-signing: true
           skip-cpython-release-tests: true
           xfail: ${{ steps.conformance-xfails.outputs.patterns }}
