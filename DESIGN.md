@@ -170,9 +170,9 @@ signature; entry certificate/key == bundle leaf; entry payload hash ==
 decoded DSSE payload hash; entry kind/version in the supported exact set
 (`dsse`/`intoto`, pinned versions); SET canonical body == inclusion-leaf
 body; proof root/tree size == checkpoint root/tree size; `logId` ==
-selected trusted key; the checkpoint signature's key name and key ID
-identify that selected trusted log instance; checkpoint origin is
-integrity-protected by the verified signature. (Modeled on Cosign
+selected trusted key; the checkpoint signature's 4-byte key ID hint selects
+candidates and its key name only orders matching candidates first; checkpoint
+origin is integrity-protected by the verified signature. (Modeled on Cosign
 GHSA-whqx-f9j3-ch6m, where an unrelated valid Rekor entry satisfied
 verification; regression fixtures reproduce that shape.)
 
@@ -186,28 +186,35 @@ the leaf's position within the specific tree the proof was issued
 against. Implementing the equality would reject this genuine bundle and
 any others whose two indices differ.
 
-**Checkpoint signed-note key binding is a live, unimplemented requirement.**
-Sigstore explicitly does not guarantee that `logId` is unique across
-deployments; the verifier must select the `TransparencyLog` instance using
-the signature line's `(key name, key ID)` tuple. For the current public root,
-key-name matching treats a trusted `baseUrl` with one leading `https://` as
-equivalent to its scheme-less form and otherwise compares bytes exactly; it
-does not perform general URL, DNS, case, Unicode, or trailing-slash
-normalization. The expected key ID is `checkpointKeyId`, falling back as the
-TrustedRoot specification requires when that legacy field is absent.
+**Checkpoint signed-note key-ID handling is candidate selection; key-name
+handling is only an unauthenticated priority hint, not authenticated log
+binding.** The verifier first compares each signature line's 4-byte key-ID
+hint with the selected key's expected hint, then tries matching names (a
+trusted `baseUrl` with one leading `https://` is equivalent to its
+scheme-less form) before trying non-matching names with the same hint. A
+non-matching name remains fully eligible if its signature verifies. Name
+comparison otherwise uses exact bytes: no general URL, DNS, case, Unicode, or
+trailing-slash normalization. The expected key ID is `checkpointKeyId`,
+falling back as the TrustedRoot specification requires when that legacy field
+is absent.
 
-The checkpoint origin is separately integrity-protected because it sits
-inside the signed note body, but it is not an additional exact-match log
-selector. The checkpoint specification only says that the log key name
-SHOULD match the origin, and the real `cli/cli` fixture legitimately carries
-origin `rekor.sigstore.dev - 1193050959916656506`, key name
-`rekor.sigstore.dev`, and trusted `baseUrl` `https://rekor.sigstore.dev`.
-Origin tampering must therefore fail signature verification, while exact
-origin-to-key-name or origin-to-`baseUrl` equality must not be required.
+The hint and name are public, unauthenticated line metadata outside the signed
+note body. The hint can avoid ECDSA work for unrelated keys; the name only
+orders likely candidates. Neither identifies or authenticates a deployment,
+binds a line to the checkpoint origin, or prevents cross-deployment confusion.
+An otherwise valid signature line with an arbitrary name still verifies via
+the fallback pass, and an attacker can label every decoy with the expected
+name to defeat the ordering optimization. The checkpoint origin is separately
+integrity-protected because it sits inside the signed note body. The
+checkpoint specification only says that the key name SHOULD match the origin,
+and the real `cli/cli` fixture carries origin
+`rekor.sigstore.dev - 1193050959916656506`, key name `rekor.sigstore.dev`, and
+trusted `baseUrl` `https://rekor.sigstore.dev`; exact origin-to-key-name or
+origin-to-`baseUrl` equality is intentionally not required in this branch.
+Deployment/origin binding is a separate follow-up.
 
-The 4-byte key ID is only a candidate-key prefilter and is public, so an
-attacker can copy it onto every decoy line; `MAX_CHECKPOINT_SIGNATURES`
-remains the hard bound on cryptographic work.
+The 4-byte key-ID hint is public, so an attacker can copy it onto every decoy
+line; `MAX_CHECKPOINT_SIGNATURES` remains the hard bound on cryptographic work.
 
 ## X.509 / Fulcio validation profile (normative)
 

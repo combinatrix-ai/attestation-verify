@@ -35,9 +35,10 @@
 //! `<origin>\n<treeSize>\n<base64 rootHash>\n`, optional extension lines,
 //! a blank line, then one or more `— <name> <base64>` signature lines.
 //! The real fixture's signatures are ASN.1 DER-encoded ECDSA (not raw
-//! 64-byte r||s) behind a 4-byte key hint this crate does not need to
-//! interpret: it already knows which trusted key to try, having selected
-//! the same one for the SET.
+//! 64-byte r||s) behind a 4-byte key hint. The hint is attacker-controlled
+//! candidate metadata used to avoid trying unrelated keys; the signature-line
+//! name is an attacker-controlled priority hint used to try likely candidates
+//! first. Neither field authenticates a deployment or log identity.
 
 use sha2::{Digest, Sha256};
 
@@ -436,7 +437,11 @@ const CHECKPOINT_SIGNATURE_PREFIX: &str = "\u{2014} ";
 /// The truncated key identifier carried ahead of each signed-note signature.
 const CHECKPOINT_KEY_HINT_BYTES: usize = 4;
 
-struct CheckpointSignature {
+struct CheckpointSignature<'a> {
+    /// The attacker-controlled signature-line key name. It is not covered by
+    /// the signed note and is used only to prioritize candidates
+    /// (`DESIGN.md` "Rekor-entry <-> bundle binding").
+    name: &'a str,
     key_hint: [u8; CHECKPOINT_KEY_HINT_BYTES],
     signature: Vec<u8>,
 }
@@ -450,10 +455,10 @@ pub(crate) struct ParsedCheckpoint<'a> {
     /// line. This exact substring is what each signature is computed
     /// over.
     note_body: &'a str,
-    /// Parsed signature lines. Verification uses the 4-byte key hint to
-    /// skip signatures for other keys before any expensive cryptographic
-    /// work.
-    signatures: Vec<CheckpointSignature>,
+    /// Parsed signature lines. Verification uses the public 4-byte key hint
+    /// to select candidates and the unauthenticated name to order them before
+    /// expensive cryptographic work; neither value authenticates log identity.
+    signatures: Vec<CheckpointSignature<'a>>,
 }
 
 pub(crate) fn parse_checkpoint(envelope: &str) -> Result<ParsedCheckpoint<'_>, Error> {
@@ -467,6 +472,14 @@ pub(crate) fn parse_checkpoint(envelope: &str) -> Result<ParsedCheckpoint<'_>, E
     let signature_text = &envelope[blank_line_at + 2..];
 
     let mut body_lines = body_text.lines();
+    // The origin is required to be present but is deliberately *not* used
+    // as a log selector (`DESIGN.md` "Rekor-entry <-> bundle binding").
+    // It is inside the note body, so tampering with it fails the signature
+    // check; the signed-note specification only says the key name SHOULD
+    // match it, and the real `cli/cli` fixture carries origin
+    // `rekor.sigstore.dev - 1193050959916656506` against key name
+    // `rekor.sigstore.dev` and `baseUrl` `https://rekor.sigstore.dev`.
+    // Requiring any two of those three to be equal rejects genuine bundles.
     let _origin = body_lines
         .next()
         .ok_or_else(|| malformed("missing origin line"))?;
@@ -512,7 +525,7 @@ pub(crate) fn parse_checkpoint(envelope: &str) -> Result<ParsedCheckpoint<'_>, E
         let rest = line
             .strip_prefix(CHECKPOINT_SIGNATURE_PREFIX)
             .ok_or_else(|| malformed("signature line missing \"\u{2014} \" marker"))?;
-        let (_name, blob_b64) = rest
+        let (name, blob_b64) = rest
             .split_once(' ')
             .ok_or_else(|| malformed("signature line missing name/signature separator"))?;
         let blob = parse_util::strict_base64("checkpoint signature line", blob_b64)?;
@@ -523,6 +536,7 @@ pub(crate) fn parse_checkpoint(envelope: &str) -> Result<ParsedCheckpoint<'_>, E
             .try_into()
             .map_err(|_| malformed("signature blob has a malformed key hint"))?;
         signatures.push(CheckpointSignature {
+            name,
             key_hint,
             signature: blob[CHECKPOINT_KEY_HINT_BYTES..].to_vec(),
         });
@@ -554,12 +568,35 @@ pub(crate) fn checkpoint_key_hint(
         .ok()
 }
 
+/// Whether a signed-note signature line's key name gets `log`'s priority.
+///
+/// `DESIGN.md` "Rekor-entry <-> bundle binding": a trusted `baseUrl`
+/// carrying one leading `https://` counts as equivalent to its scheme-less
+/// form, and everything else compares byte for byte. Deliberately no case
+/// folding, trailing-slash trimming, percent-decoding, or DNS/Unicode
+/// normalization: every one of those widens what an attacker-supplied
+/// string receives priority, and none is needed for the real fixture
+/// (`baseUrl` `https://rekor.sigstore.dev`, key name `rekor.sigstore.dev`).
+/// This comparison is not an acceptance condition or authenticated binding.
+fn checkpoint_key_name_matches(log: &TransparencyLog, name: &str) -> bool {
+    let base_url = log.base_url.as_str();
+    name == base_url || Some(name) == base_url.strip_prefix("https://")
+}
+
 /// Verifies a checkpoint envelope: its tree size and root hash must match
 /// the inclusion proof it anchors, and at least one of its signature
-/// lines with the trusted log's 4-byte signed-note key hint must verify
-/// against `log_key` — the same trusted key already selected for the SET
-/// (`DESIGN.md` "Rekor-entry <-> bundle binding": `logId == selected trusted
-/// key`). Non-matching hints are skipped before ECDSA verification.
+/// lines carrying the trusted log's 4-byte key hint must verify against
+/// `log_key` — the same trusted key already selected for the SET
+/// (`DESIGN.md` "Rekor-entry <-> bundle binding": `logId == selected
+/// trusted key`). Matching key names are tried first, but non-matching names
+/// remain eligible as a fallback.
+///
+/// The key hint is public candidate metadata, while the name is a public
+/// priority hint; both are outside the signed note body and unauthenticated.
+/// A valid signature line with an arbitrary name therefore still verifies via
+/// the fallback pass, and an attacker can label every decoy with the expected
+/// name to defeat the ordering optimization. This branch deliberately does
+/// not implement deployment/origin binding.
 ///
 /// # Errors
 ///
@@ -600,7 +637,14 @@ pub(crate) fn verify_checkpoint(
         .signatures
         .iter()
         .filter(|signature| signature.key_hint == key_hint)
-        .any(|signature| log_key.verify_der(note_body_bytes, &signature.signature));
+        .filter(|signature| checkpoint_key_name_matches(log, signature.name))
+        .any(|signature| log_key.verify_der(note_body_bytes, &signature.signature))
+        || checkpoint
+            .signatures
+            .iter()
+            .filter(|signature| signature.key_hint == key_hint)
+            .filter(|signature| !checkpoint_key_name_matches(log, signature.name))
+            .any(|signature| log_key.verify_der(note_body_bytes, &signature.signature));
     if verified {
         Ok(())
     } else {
@@ -820,7 +864,8 @@ mod tests {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
 
     use super::{
-        CHECKPOINT_SIGNATURE_PREFIX, VerifiedTimestamp, check_entry_binding, check_time_window,
+        CHECKPOINT_KEY_HINT_BYTES, CHECKPOINT_SIGNATURE_PREFIX, VerifiedTimestamp,
+        check_entry_binding, check_time_window, checkpoint_key_name_matches, parse_checkpoint,
         parse_tlog_entry_body, select_log_key, verify_checkpoint, verify_inclusion_proof,
         verify_set, verify_tlog_entry,
     };
@@ -928,6 +973,51 @@ mod tests {
         for _ in 0..count {
             flooded.push_str(CHECKPOINT_SIGNATURE_PREFIX);
             flooded.push_str("decoy ");
+            flooded.push_str(&decoy_blob);
+            flooded.push('\n');
+        }
+        flooded.push_str(genuine_signatures);
+        Ok(flooded)
+    }
+
+    /// Like [`prepend_decoy_signature_lines`], but each decoy copies the
+    /// genuine line's key hint and carries `name`, allowing tests to control
+    /// whether the name-priority hint matches or misses.
+    ///
+    /// The hint is public, so an attacker can always replay it; this is what
+    /// isolates the name-priority behavior, which the all-zero hints in
+    /// [`prepend_decoy_signature_lines`] would otherwise mask.
+    fn prepend_decoys_with_genuine_key_hint(
+        envelope: &str,
+        count: usize,
+        name: &str,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let (body, genuine_signatures) = envelope
+            .split_once("\n\n")
+            .ok_or("missing blank line separating body from signatures")?;
+        let genuine_line = genuine_signatures
+            .lines()
+            .find(|line| line.starts_with(CHECKPOINT_SIGNATURE_PREFIX))
+            .ok_or("no genuine signature line")?;
+        let genuine_blob = STANDARD.decode(
+            genuine_line
+                .rsplit_once(' ')
+                .ok_or("malformed genuine signature line")?
+                .1,
+        )?;
+        let mut decoy = genuine_blob
+            .get(..CHECKPOINT_KEY_HINT_BYTES)
+            .ok_or("genuine signature has no key hint")?
+            .to_vec();
+        decoy.extend_from_slice(&[0x30, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x01]);
+        let decoy_blob = STANDARD.encode(decoy);
+
+        let mut flooded = String::from(body);
+        flooded.push_str("\n\n");
+        for _ in 0..count {
+            flooded.push_str(CHECKPOINT_SIGNATURE_PREFIX);
+            flooded.push_str(name);
+            flooded.push(' ');
             flooded.push_str(&decoy_blob);
             flooded.push('\n');
         }
@@ -1521,6 +1611,180 @@ mod tests {
             limits::MAX_CHECKPOINT_SIGNATURES - 1,
         )?;
         verify_checkpoint(&padded, proof.tree_size, &proof.root_hash, log, &log_key)?;
+        Ok(())
+    }
+
+    #[test]
+    fn checkpoint_signature_name_is_only_an_unauthenticated_priority_hint()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let bundle = real_bundle()?;
+        let trust_store = embedded_trust_store()?;
+        let tlog_entry = &bundle.verification_material.tlog_entries[0];
+        let proof = tlog_entry
+            .inclusion_proof
+            .as_ref()
+            .ok_or("missing inclusion proof")?;
+        let (log, log_key) = select_log_key(&trust_store, &tlog_entry.log_id_key_id)?;
+
+        // Copy the genuine hint and DER signature verbatim, but give the
+        // otherwise-valid line an arbitrary label. The label is outside the
+        // signed note body, so it must not prevent cryptographic verification.
+        let signature_line_index = proof
+            .checkpoint
+            .envelope
+            .split('\n')
+            .position(|line| line.starts_with(CHECKPOINT_SIGNATURE_PREFIX))
+            .ok_or("missing signature line")?;
+        let sig_line = proof
+            .checkpoint
+            .envelope
+            .split('\n')
+            .nth(signature_line_index)
+            .ok_or("missing signature line")?;
+        let blob_b64 = sig_line
+            .strip_prefix(CHECKPOINT_SIGNATURE_PREFIX)
+            .and_then(|line| line.rsplit_once(' '))
+            .map(|(_, blob)| blob)
+            .ok_or("malformed signature line")?;
+        let other_label = format!("{CHECKPOINT_SIGNATURE_PREFIX}other.log.example {blob_b64}");
+        let other_labeled_envelope = replace_checkpoint_line(
+            &proof.checkpoint.envelope,
+            signature_line_index,
+            &other_label,
+        )?;
+        let other_checkpoint = parse_checkpoint(&other_labeled_envelope)?;
+        let original_checkpoint = parse_checkpoint(&proof.checkpoint.envelope)?;
+        assert_eq!(other_checkpoint.note_body, original_checkpoint.note_body);
+        assert_eq!(other_checkpoint.signatures.len(), 1);
+        assert_eq!(
+            other_checkpoint.signatures[0].key_hint,
+            original_checkpoint.signatures[0].key_hint
+        );
+        assert_eq!(
+            other_checkpoint.signatures[0].signature,
+            original_checkpoint.signatures[0].signature
+        );
+
+        // The unchanged valid signature still verifies despite the arbitrary
+        // label, proving that name matching only affects ordering.
+        verify_checkpoint(
+            &other_labeled_envelope,
+            proof.tree_size,
+            &proof.root_hash,
+            log,
+            &log_key,
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn checkpoint_key_name_priority_is_exact_apart_from_one_https_prefix()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let trust_store = embedded_trust_store()?;
+        let log = trust_store
+            .tlogs
+            .iter()
+            .find(|log| log.base_url == "https://rekor.sigstore.dev")
+            .ok_or("embedded root has no rekor.sigstore.dev log")?;
+
+        for accepted in ["rekor.sigstore.dev", "https://rekor.sigstore.dev"] {
+            if !checkpoint_key_name_matches(log, accepted) {
+                return Err(format!("expected {accepted:?} to match").into());
+            }
+        }
+        // Each name below misses the priority predicate. It remains eligible
+        // in the fallback pass; this test only pins the ordering distinction.
+        for rejected in [
+            "Rekor.Sigstore.Dev",
+            "rekor.sigstore.dev/",
+            "https://rekor.sigstore.dev/",
+            "http://rekor.sigstore.dev",
+            "https://https://rekor.sigstore.dev",
+            "rekor.sigstore.dev.",
+            " rekor.sigstore.dev",
+            "",
+        ] {
+            if checkpoint_key_name_matches(log, rejected) {
+                return Err(format!("expected {rejected:?} to be rejected").into());
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn public_verifier_prioritizes_matching_checkpoint_signature_names()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let verifier = verifier_with_correct_policy()?;
+        let subject = Subject::from_digest_hex(
+            "f146e594bdba65fdc499c43c86d6d07c0e0733257152067c4f9fe2acee4f4629",
+        )?;
+
+        reset_verify_der_call_count();
+        verifier.verify_digest(&subject, &real_bundle()?)?;
+        let genuine_verify_calls = verify_der_call_count();
+
+        // Decoys carrying the *genuine* key hint: the hint is public, so
+        // replaying it is free. Their non-matching names should leave them
+        // in the fallback pass, after the genuine matching line.
+        let mut padded_bundle = real_bundle()?;
+        let proof = padded_bundle.verification_material.tlog_entries[0]
+            .inclusion_proof
+            .as_mut()
+            .ok_or("missing inclusion proof")?;
+        proof.checkpoint.envelope = prepend_decoys_with_genuine_key_hint(
+            &proof.checkpoint.envelope,
+            limits::MAX_CHECKPOINT_SIGNATURES - 1,
+            "other.log.example",
+        )?;
+
+        reset_verify_der_call_count();
+        verifier.verify_digest(&subject, &padded_bundle)?;
+        let padded_verify_calls = verify_der_call_count();
+
+        if padded_verify_calls != genuine_verify_calls {
+            return Err(format!(
+                "non-matching-name decoys ran before the genuine matching line: genuine={genuine_verify_calls}, padded={padded_verify_calls}"
+            )
+            .into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn attacker_can_defeat_checkpoint_name_priority() -> Result<(), Box<dyn std::error::Error>> {
+        let verifier = verifier_with_correct_policy()?;
+        let subject = Subject::from_digest_hex(
+            "f146e594bdba65fdc499c43c86d6d07c0e0733257152067c4f9fe2acee4f4629",
+        )?;
+
+        reset_verify_der_call_count();
+        verifier.verify_digest(&subject, &real_bundle()?)?;
+        let genuine_verify_calls = verify_der_call_count();
+
+        // An attacker can copy the public hint and use the expected name on
+        // every decoy. All of those candidates are then in the preferred
+        // pass, so the name hint provides no work reduction.
+        let mut padded_bundle = real_bundle()?;
+        let proof = padded_bundle.verification_material.tlog_entries[0]
+            .inclusion_proof
+            .as_mut()
+            .ok_or("missing inclusion proof")?;
+        proof.checkpoint.envelope = prepend_decoys_with_genuine_key_hint(
+            &proof.checkpoint.envelope,
+            limits::MAX_CHECKPOINT_SIGNATURES - 1,
+            "rekor.sigstore.dev",
+        )?;
+
+        reset_verify_der_call_count();
+        verifier.verify_digest(&subject, &padded_bundle)?;
+        let padded_verify_calls = verify_der_call_count();
+        let expected_calls = genuine_verify_calls + limits::MAX_CHECKPOINT_SIGNATURES - 1;
+        if padded_verify_calls != expected_calls {
+            return Err(format!(
+                "expected every matching-name decoy to reach ECDSA: genuine={genuine_verify_calls}, padded={padded_verify_calls}, expected={expected_calls}"
+            )
+            .into());
+        }
         Ok(())
     }
 
