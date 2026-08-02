@@ -5,7 +5,10 @@
 //! authorities only (bundle-supplied roots are never trusted, and this
 //! crate does not even parse any), the allowed signature-algorithm/curve
 //! pairing, name chaining, time windows, and the Fulcio leaf/CA
-//! certificate profile. [`crate::sct`] (SCT verification) and
+//! certificate profile. RFC 5280 SS4.2's "reject an unrecognized critical
+//! extension" rule applies to *every* certificate validated here -- the
+//! leaf and each trust-store chain certificate alike -- against a
+//! per-role known-extension set. [`crate::sct`] (SCT verification) and
 //! [`crate::fulcio`] (claims extraction) both consume this module's
 //! [`ValidatedLeaf`]. Run as step 5 of
 //! [`crate::Verifier::verify_digest`]'s chain, after the transparency-log
@@ -59,6 +62,23 @@ const KNOWN_LEAF_EXTENSION_OIDS: [ObjectIdentifier; 5] = [
     SCT_LIST_OID,
 ];
 
+/// Extensions a chain certificate authority may carry as *critical*
+/// without being rejected for an unrecognized critical extension.
+///
+/// Deliberately narrower than [`KNOWN_LEAF_EXTENSION_OIDS`]: only the two
+/// extensions [`verify_ca_profile`] actually enforces. Empirically, every
+/// `certificateAuthorities[].certChain` certificate in both the embedded
+/// public-good root and GitHub's trust root marks exactly `keyUsage` and
+/// `basicConstraints` critical; `extKeyUsage`, `subjectKeyIdentifier` and
+/// `authorityKeyIdentifier` are present on some of them but always
+/// non-critical, so admitting them here would buy nothing and would mask
+/// a constraint this crate does not enforce. `nameConstraints`
+/// (2.5.29.30) and `policyConstraints` are likewise absent: unimplemented
+/// means a caller-supplied intermediate carrying one critically must be
+/// rejected, not silently unconstrained.
+const KNOWN_CA_CRITICAL_EXTENSION_OIDS: [ObjectIdentifier; 2] =
+    [ID_CE_KEY_USAGE, ID_CE_BASIC_CONSTRAINTS];
+
 /// A leaf certificate that has been fully validated against a trust
 /// store's certificate authorities, per `DESIGN.md`'s "X.509 / Fulcio
 /// validation profile".
@@ -101,12 +121,13 @@ pub(crate) struct ValidatedLeaf {
 ///
 /// Tries every certificate authority whose chain's nearest-to-leaf
 /// certificate has `subject` matching the leaf's `issuer`, in trust-store
-/// order; the first fully-successful candidate wins. If exactly one
-/// candidate's issuer name matches but a later check fails, that specific
-/// error is returned (rather than being masked as a generic "untrusted");
-/// if more than one candidate's name matched and all of them failed, the
-/// failure is not attributable to a single candidate and
-/// [`CertificateError::UntrustedCertificate`] is returned instead.
+/// order; the first fully-successful candidate wins. If every
+/// name-matching candidate fails, the error from the *first* of them (in
+/// trust-store order) is returned, rather than being masked as a generic
+/// "untrusted": a candidate that named itself this leaf's issuer produced
+/// a real, attributable reason, and reporting one such reason is more
+/// useful than reporting none. [`CertificateError::UntrustedCertificate`]
+/// is reserved for the case where no candidate's name matched at all.
 ///
 /// # Errors
 ///
@@ -114,7 +135,7 @@ pub(crate) struct ValidatedLeaf {
 /// trust-store certificate) does not parse,
 /// [`CertificateError::UntrustedCertificate`] if no certificate
 /// authority's chain issues this leaf at all, and otherwise whatever
-/// specific [`CertificateError`] the sole name-matching candidate failed
+/// specific [`CertificateError`] the first name-matching candidate failed
 /// on (signature, name, time, or profile).
 pub(crate) fn validate_chain(
     leaf_der: &[u8],
@@ -270,7 +291,7 @@ fn verify_signature(child: &Certificate, issuer: &Certificate) -> Result<(), Err
 fn verify_leaf_profile(leaf: &Certificate) -> Result<(), Error> {
     let extensions = extensions_slice(leaf.tbs_certificate());
 
-    reject_unknown_critical_extensions(extensions)?;
+    reject_unknown_critical_extensions(extensions, &KNOWN_LEAF_EXTENSION_OIDS)?;
 
     if let Some(bc) =
         find_extension_decoded::<BasicConstraints>(extensions, ID_CE_BASIC_CONSTRAINTS)?
@@ -298,9 +319,15 @@ fn verify_leaf_profile(leaf: &Certificate) -> Result<(), Error> {
 
 /// The certificate-authority profile applied to every certificate in a
 /// chain (intermediate and root alike -- confirmed empirically that both
-/// carry the same shape on the real trust root): `basicConstraints`
-/// `CA:TRUE` with any `pathLenConstraint` respected, and `keyUsage`
-/// `keyCertSign`.
+/// carry the same shape on the real trust root): no unrecognized critical
+/// extension, `basicConstraints` `CA:TRUE` with any `pathLenConstraint`
+/// respected, and `keyUsage` `keyCertSign`.
+///
+/// The critical-extension gate uses [`KNOWN_CA_CRITICAL_EXTENSION_OIDS`],
+/// not the leaf's set, so a caller-supplied intermediate restricted by a
+/// critical constraint this crate does not implement (`nameConstraints`
+/// above all) fails closed instead of having that restriction silently
+/// ignored, per RFC 5280 SS4.2/SS6.1.
 ///
 /// `subordinate_ca_count` is the number of certificate authorities
 /// strictly between `cert` and the leaf (0 for the certificate that
@@ -308,6 +335,8 @@ fn verify_leaf_profile(leaf: &Certificate) -> Result<(), Error> {
 /// per RFC 5280 SS4.2.1.9.
 fn verify_ca_profile(cert: &Certificate, subordinate_ca_count: usize) -> Result<(), Error> {
     let extensions = extensions_slice(cert.tbs_certificate());
+
+    reject_unknown_critical_extensions(extensions, &KNOWN_CA_CRITICAL_EXTENSION_OIDS)?;
 
     let bc = find_extension_decoded::<BasicConstraints>(extensions, ID_CE_BASIC_CONSTRAINTS)?
         .ok_or(Error::Certificate(
@@ -337,9 +366,17 @@ fn extensions_slice(tbs: &TbsCertificate) -> &[Extension] {
     tbs.extensions().map_or(&[], |exts| exts.as_slice())
 }
 
-fn reject_unknown_critical_extensions(extensions: &[Extension]) -> Result<(), Error> {
+/// RFC 5280 SS4.2/SS6.1: a certificate carrying a critical extension the
+/// verifier does not recognize must be rejected. `known` is the caller's
+/// role-specific recognized set ([`KNOWN_LEAF_EXTENSION_OIDS`] for a leaf,
+/// [`KNOWN_CA_CRITICAL_EXTENSION_OIDS`] for a chain certificate
+/// authority).
+fn reject_unknown_critical_extensions(
+    extensions: &[Extension],
+    known: &[ObjectIdentifier],
+) -> Result<(), Error> {
     for ext in extensions {
-        if ext.critical && !KNOWN_LEAF_EXTENSION_OIDS.contains(&ext.extn_id) {
+        if ext.critical && !known.contains(&ext.extn_id) {
             return Err(Error::Certificate(
                 CertificateError::UnknownCriticalExtension,
             ));
@@ -625,18 +662,21 @@ mod tests {
         }
     }
 
-    /// Re-marks the extension at `oid` critical within `leaf_der`'s
+    /// Re-marks the extension at `oid` critical within `cert_der`'s
     /// `TBSCertificate`, leaving everything else -- including the now
     /// cryptographically-stale outer signature -- untouched.
     ///
     /// Safe for a "does the profile check fire" test specifically
-    /// because [`verify_leaf_profile`] (which is where
-    /// `reject_unknown_critical_extensions` lives) runs *before* any
-    /// chain-signature verification in [`try_validate_against_ca`], so
-    /// this tampered leaf is rejected for the reason under test before
-    /// the stale signature would ever matter.
+    /// because both profile checks (which is where
+    /// `reject_unknown_critical_extensions` is called) run *before* the
+    /// signature over the certificate being tampered with is verified in
+    /// [`try_validate_against_ca`]: the leaf's profile is checked before
+    /// the chain walk starts, and each chain certificate's profile is
+    /// checked at its own step, one step before its issuer verifies its
+    /// signature. So the tampered certificate is rejected for the reason
+    /// under test before the stale signature would ever matter.
     fn mark_extension_critical(
-        leaf_der: &[u8],
+        cert_der: &[u8],
         oid: der::asn1::ObjectIdentifier,
     ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         use der::{Tag, TagNumber, Tagged};
@@ -647,7 +687,7 @@ mod tests {
             number: TagNumber(3),
         };
 
-        let outer = Vec::<der::asn1::AnyRef<'_>>::from_der(leaf_der)?;
+        let outer = Vec::<der::asn1::AnyRef<'_>>::from_der(cert_der)?;
         let [cert_tbs, sig_alg, signature] = <[der::asn1::AnyRef<'_>; 3]>::try_from(outer)
             .map_err(|_| "expected exactly 3 top-level Certificate fields")?;
 
@@ -685,6 +725,59 @@ mod tests {
         let tampered_der = mark_extension_critical(&leaf_der, source_repository_uri_oid)?;
         let trust_store = embedded_trust_store()?;
         match validate_chain(&tampered_der, &trust_store, REAL_INTEGRATED_TIME) {
+            Err(Error::Certificate(CertificateError::UnknownCriticalExtension)) => Ok(()),
+            other => Err(format!("expected UnknownCriticalExtension, got {other:?}").into()),
+        }
+    }
+
+    /// Builds a trust store whose `certificateAuthorities[1]`
+    /// intermediate -- the one that actually issues the real leaf -- has
+    /// the extension at `oid` re-marked critical, via the same DER
+    /// surgery [`mark_extension_critical`] performs on a leaf.
+    fn public_good_with_critical_intermediate_extension(
+        oid: der::asn1::ObjectIdentifier,
+    ) -> Result<TrustStore, Box<dyn std::error::Error>> {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+        mutate_public_good_json(|v| {
+            let slot =
+                &mut v["certificateAuthorities"][1]["certChain"]["certificates"][0]["rawBytes"];
+            let der = STANDARD.decode(slot.as_str().ok_or("expected rawBytes string")?)?;
+            *slot = serde_json::Value::String(STANDARD.encode(mark_extension_critical(&der, oid)?));
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn unknown_critical_extension_on_chain_ca_is_rejected() -> Result<(), Box<dyn std::error::Error>>
+    {
+        // `authorityKeyIdentifier` is present and non-critical on the
+        // real sigstore intermediate, and is outside the certificate-
+        // authority known set (which holds only `keyUsage` and
+        // `basicConstraints`), so marking it critical must be rejected
+        // per RFC 5280 SS4.2 -- the same rule the leaf has always been
+        // held to.
+        let authority_key_identifier_oid = der::asn1::ObjectIdentifier::new_unwrap("2.5.29.35");
+        let trust_store =
+            public_good_with_critical_intermediate_extension(authority_key_identifier_oid)?;
+        let leaf_der = real_leaf_der()?;
+        match validate_chain(&leaf_der, &trust_store, REAL_INTEGRATED_TIME) {
+            Err(Error::Certificate(CertificateError::UnknownCriticalExtension)) => Ok(()),
+            other => Err(format!("expected UnknownCriticalExtension, got {other:?}").into()),
+        }
+    }
+
+    #[test]
+    fn critical_extended_key_usage_on_chain_ca_is_rejected()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // Pins that the certificate-authority known set is genuinely
+        // narrower than the leaf's: `extKeyUsage` is a known *leaf*
+        // extension, but nothing in `verify_ca_profile` enforces it, so
+        // a critical one on a chain certificate must still fail closed.
+        let ext_key_usage_oid = der::asn1::ObjectIdentifier::new_unwrap("2.5.29.37");
+        let trust_store = public_good_with_critical_intermediate_extension(ext_key_usage_oid)?;
+        let leaf_der = real_leaf_der()?;
+        match validate_chain(&leaf_der, &trust_store, REAL_INTEGRATED_TIME) {
             Err(Error::Certificate(CertificateError::UnknownCriticalExtension)) => Ok(()),
             other => Err(format!("expected UnknownCriticalExtension, got {other:?}").into()),
         }
