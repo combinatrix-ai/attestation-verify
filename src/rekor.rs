@@ -35,11 +35,10 @@
 //! `<origin>\n<treeSize>\n<base64 rootHash>\n`, optional extension lines,
 //! a blank line, then one or more `— <name> <base64>` signature lines.
 //! The real fixture's signatures are ASN.1 DER-encoded ECDSA (not raw
-//! 64-byte r||s) behind a 4-byte key hint. The signature-line name and hint
-//! are attacker-controlled, unauthenticated candidate metadata: this crate
-//! uses them only as cheap prefilters before trying the trusted key already
-//! selected for the SET. Neither field authenticates a deployment or log
-//! identity.
+//! 64-byte r||s) behind a 4-byte key hint. The hint is attacker-controlled
+//! candidate metadata used to avoid trying unrelated keys; the signature-line
+//! name is an attacker-controlled priority hint used to try likely candidates
+//! first. Neither field authenticates a deployment or log identity.
 
 use sha2::{Digest, Sha256};
 
@@ -440,7 +439,7 @@ const CHECKPOINT_KEY_HINT_BYTES: usize = 4;
 
 struct CheckpointSignature<'a> {
     /// The attacker-controlled signature-line key name. It is not covered by
-    /// the signed note and is used only as a cheap candidate prefilter
+    /// the signed note and is used only to prioritize candidates
     /// (`DESIGN.md` "Rekor-entry <-> bundle binding").
     name: &'a str,
     key_hint: [u8; CHECKPOINT_KEY_HINT_BYTES],
@@ -456,9 +455,9 @@ pub(crate) struct ParsedCheckpoint<'a> {
     /// line. This exact substring is what each signature is computed
     /// over.
     note_body: &'a str,
-    /// Parsed signature lines. Verification uses the unauthenticated name
-    /// and 4-byte key hint to skip candidates before any expensive
-    /// cryptographic work; neither value authenticates log identity.
+    /// Parsed signature lines. Verification uses the public 4-byte key hint
+    /// to select candidates and the unauthenticated name to order them before
+    /// expensive cryptographic work; neither value authenticates log identity.
     signatures: Vec<CheckpointSignature<'a>>,
 }
 
@@ -569,17 +568,16 @@ pub(crate) fn checkpoint_key_hint(
         .ok()
 }
 
-/// Whether a signed-note signature line's key name passes `log`'s cheap
-/// candidate prefilter.
+/// Whether a signed-note signature line's key name gets `log`'s priority.
 ///
 /// `DESIGN.md` "Rekor-entry <-> bundle binding": a trusted `baseUrl`
 /// carrying one leading `https://` counts as equivalent to its scheme-less
 /// form, and everything else compares byte for byte. Deliberately no case
 /// folding, trailing-slash trimming, percent-decoding, or DNS/Unicode
 /// normalization: every one of those widens what an attacker-supplied
-/// string can reach the cryptographic verifier, and none is needed for the
-/// real fixture (`baseUrl` `https://rekor.sigstore.dev`, key name
-/// `rekor.sigstore.dev`). This comparison is not an authenticated binding.
+/// string receives priority, and none is needed for the real fixture
+/// (`baseUrl` `https://rekor.sigstore.dev`, key name `rekor.sigstore.dev`).
+/// This comparison is not an acceptance condition or authenticated binding.
 fn checkpoint_key_name_matches(log: &TransparencyLog, name: &str) -> bool {
     let base_url = log.base_url.as_str();
     name == base_url || Some(name) == base_url.strip_prefix("https://")
@@ -587,17 +585,18 @@ fn checkpoint_key_name_matches(log: &TransparencyLog, name: &str) -> bool {
 
 /// Verifies a checkpoint envelope: its tree size and root hash must match
 /// the inclusion proof it anchors, and at least one of its signature
-/// lines passing the trusted log's `(key name, 4-byte key hint)` candidate
-/// prefilters must verify against `log_key` — the same trusted key already
-/// selected for the SET (`DESIGN.md` "Rekor-entry <-> bundle binding":
-/// `logId == selected trusted key`).
+/// lines carrying the trusted log's 4-byte key hint must verify against
+/// `log_key` — the same trusted key already selected for the SET
+/// (`DESIGN.md` "Rekor-entry <-> bundle binding": `logId == selected
+/// trusted key`). Matching key names are tried first, but non-matching names
+/// remain eligible as a fallback.
 ///
-/// The name and hint are candidate selection, not authentication: both are
-/// public and unauthenticated, and the line metadata is outside the signed
-/// note body. They only avoid ECDSA work for non-matching candidates; an
-/// attacker can relabel a valid signature line with the expected name and
-/// reuse its hint without changing the note body or signature bytes. This
-/// branch deliberately does not implement deployment/origin binding.
+/// The key hint is public candidate metadata, while the name is a public
+/// priority hint; both are outside the signed note body and unauthenticated.
+/// A valid signature line with an arbitrary name therefore still verifies via
+/// the fallback pass, and an attacker can label every decoy with the expected
+/// name to defeat the ordering optimization. This branch deliberately does
+/// not implement deployment/origin binding.
 ///
 /// # Errors
 ///
@@ -637,10 +636,15 @@ pub(crate) fn verify_checkpoint(
     let verified = checkpoint
         .signatures
         .iter()
-        .filter(|signature| {
-            signature.key_hint == key_hint && checkpoint_key_name_matches(log, signature.name)
-        })
-        .any(|signature| log_key.verify_der(note_body_bytes, &signature.signature));
+        .filter(|signature| signature.key_hint == key_hint)
+        .filter(|signature| checkpoint_key_name_matches(log, signature.name))
+        .any(|signature| log_key.verify_der(note_body_bytes, &signature.signature))
+        || checkpoint
+            .signatures
+            .iter()
+            .filter(|signature| signature.key_hint == key_hint)
+            .filter(|signature| !checkpoint_key_name_matches(log, signature.name))
+            .any(|signature| log_key.verify_der(note_body_bytes, &signature.signature));
     if verified {
         Ok(())
     } else {
@@ -977,10 +981,11 @@ mod tests {
     }
 
     /// Like [`prepend_decoy_signature_lines`], but each decoy copies the
-    /// genuine line's key hint and carries `name`.
+    /// genuine line's key hint and carries `name`, allowing tests to control
+    /// whether the name-priority hint matches or misses.
     ///
     /// The hint is public, so an attacker can always replay it; this is what
-    /// isolates the key-*name* filter, which the all-zero hints in
+    /// isolates the name-priority behavior, which the all-zero hints in
     /// [`prepend_decoy_signature_lines`] would otherwise mask.
     fn prepend_decoys_with_genuine_key_hint(
         envelope: &str,
@@ -1610,7 +1615,7 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_signature_name_is_only_an_unauthenticated_prefilter()
+    fn checkpoint_signature_name_is_only_an_unauthenticated_priority_hint()
     -> Result<(), Box<dyn std::error::Error>> {
         let bundle = real_bundle()?;
         let trust_store = embedded_trust_store()?;
@@ -1623,7 +1628,7 @@ mod tests {
 
         // Copy the genuine hint and DER signature verbatim, but give the
         // otherwise-valid line an arbitrary label. The label is outside the
-        // signed note body, so this only exercises the cheap name prefilter.
+        // signed note body, so it must not prevent cryptographic verification.
         let signature_line_index = proof
             .checkpoint
             .envelope
@@ -1647,51 +1652,23 @@ mod tests {
             signature_line_index,
             &other_label,
         )?;
-        let trusted_name = log
-            .base_url
-            .strip_prefix("https://")
-            .unwrap_or(log.base_url.as_str());
-        let trusted_label = format!("{CHECKPOINT_SIGNATURE_PREFIX}{trusted_name} {blob_b64}");
-        let relabeled_envelope = replace_checkpoint_line(
-            &other_labeled_envelope,
-            signature_line_index,
-            &trusted_label,
-        )?;
-
         let other_checkpoint = parse_checkpoint(&other_labeled_envelope)?;
-        let relabeled_checkpoint = parse_checkpoint(&relabeled_envelope)?;
-        assert_eq!(other_checkpoint.note_body, relabeled_checkpoint.note_body);
+        let original_checkpoint = parse_checkpoint(&proof.checkpoint.envelope)?;
+        assert_eq!(other_checkpoint.note_body, original_checkpoint.note_body);
         assert_eq!(other_checkpoint.signatures.len(), 1);
-        assert_eq!(relabeled_checkpoint.signatures.len(), 1);
         assert_eq!(
             other_checkpoint.signatures[0].key_hint,
-            relabeled_checkpoint.signatures[0].key_hint
+            original_checkpoint.signatures[0].key_hint
         );
         assert_eq!(
             other_checkpoint.signatures[0].signature,
-            relabeled_checkpoint.signatures[0].signature
+            original_checkpoint.signatures[0].signature
         );
 
-        match verify_checkpoint(
-            &other_labeled_envelope,
-            proof.tree_size,
-            &proof.root_hash,
-            log,
-            &log_key,
-        ) {
-            Err(Error::Transparency(TransparencyError::CheckpointSignatureInvalid)) => {}
-            other => {
-                return Err(
-                    format!("expected arbitrary name to be filtered, got {other:?}").into(),
-                );
-            }
-        }
-
-        // Relabeling the same valid signature line to the expected name makes
-        // it acceptable. This is why name/hint matching must not be described
-        // as deployment or log authentication.
+        // The unchanged valid signature still verifies despite the arbitrary
+        // label, proving that name matching only affects ordering.
         verify_checkpoint(
-            &relabeled_envelope,
+            &other_labeled_envelope,
             proof.tree_size,
             &proof.root_hash,
             log,
@@ -1701,7 +1678,7 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_key_name_matching_is_exact_apart_from_one_https_prefix()
+    fn checkpoint_key_name_priority_is_exact_apart_from_one_https_prefix()
     -> Result<(), Box<dyn std::error::Error>> {
         let trust_store = embedded_trust_store()?;
         let log = trust_store
@@ -1715,9 +1692,8 @@ mod tests {
                 return Err(format!("expected {accepted:?} to match").into());
             }
         }
-        // Each rejection below is a normalization this deliberately does
-        // not perform; accepting any of them would widen the candidate set
-        // that reaches cryptographic verification, without adding auth.
+        // Each name below misses the priority predicate. It remains eligible
+        // in the fallback pass; this test only pins the ordering distinction.
         for rejected in [
             "Rekor.Sigstore.Dev",
             "rekor.sigstore.dev/",
@@ -1736,7 +1712,7 @@ mod tests {
     }
 
     #[test]
-    fn public_verifier_skips_checkpoint_signatures_with_other_key_names()
+    fn public_verifier_prioritizes_matching_checkpoint_signature_names()
     -> Result<(), Box<dyn std::error::Error>> {
         let verifier = verifier_with_correct_policy()?;
         let subject = Subject::from_digest_hex(
@@ -1748,8 +1724,8 @@ mod tests {
         let genuine_verify_calls = verify_der_call_count();
 
         // Decoys carrying the *genuine* key hint: the hint is public, so
-        // replaying it is free, and the name filter is the only thing left
-        // to discard them before the curve arithmetic.
+        // replaying it is free. Their non-matching names should leave them
+        // in the fallback pass, after the genuine matching line.
         let mut padded_bundle = real_bundle()?;
         let proof = padded_bundle.verification_material.tlog_entries[0]
             .inclusion_proof
@@ -1767,7 +1743,45 @@ mod tests {
 
         if padded_verify_calls != genuine_verify_calls {
             return Err(format!(
-                "decoys with the genuine key hint but a non-matching name reached ECDSA verification: genuine={genuine_verify_calls}, padded={padded_verify_calls}"
+                "non-matching-name decoys ran before the genuine matching line: genuine={genuine_verify_calls}, padded={padded_verify_calls}"
+            )
+            .into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn attacker_can_defeat_checkpoint_name_priority() -> Result<(), Box<dyn std::error::Error>> {
+        let verifier = verifier_with_correct_policy()?;
+        let subject = Subject::from_digest_hex(
+            "f146e594bdba65fdc499c43c86d6d07c0e0733257152067c4f9fe2acee4f4629",
+        )?;
+
+        reset_verify_der_call_count();
+        verifier.verify_digest(&subject, &real_bundle()?)?;
+        let genuine_verify_calls = verify_der_call_count();
+
+        // An attacker can copy the public hint and use the expected name on
+        // every decoy. All of those candidates are then in the preferred
+        // pass, so the name hint provides no work reduction.
+        let mut padded_bundle = real_bundle()?;
+        let proof = padded_bundle.verification_material.tlog_entries[0]
+            .inclusion_proof
+            .as_mut()
+            .ok_or("missing inclusion proof")?;
+        proof.checkpoint.envelope = prepend_decoys_with_genuine_key_hint(
+            &proof.checkpoint.envelope,
+            limits::MAX_CHECKPOINT_SIGNATURES - 1,
+            "rekor.sigstore.dev",
+        )?;
+
+        reset_verify_der_call_count();
+        verifier.verify_digest(&subject, &padded_bundle)?;
+        let padded_verify_calls = verify_der_call_count();
+        let expected_calls = genuine_verify_calls + limits::MAX_CHECKPOINT_SIGNATURES - 1;
+        if padded_verify_calls != expected_calls {
+            return Err(format!(
+                "expected every matching-name decoy to reach ECDSA: genuine={genuine_verify_calls}, padded={padded_verify_calls}, expected={expected_calls}"
             )
             .into());
         }

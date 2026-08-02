@@ -170,8 +170,8 @@ signature; entry certificate/key == bundle leaf; entry payload hash ==
 decoded DSSE payload hash; entry kind/version in the supported exact set
 (`dsse`/`intoto`, pinned versions); SET canonical body == inclusion-leaf
 body; proof root/tree size == checkpoint root/tree size; `logId` ==
-selected trusted key; the checkpoint signature's key name and key ID are
-used as cheap candidate prefilters before trying that selected key; checkpoint
+selected trusted key; the checkpoint signature's 4-byte key ID hint selects
+candidates and its key name only orders matching candidates first; checkpoint
 origin is integrity-protected by the verified signature. (Modeled on Cosign
 GHSA-whqx-f9j3-ch6m, where an unrelated valid Rekor entry satisfied
 verification; regression fixtures reproduce that shape.)
@@ -186,23 +186,25 @@ the leaf's position within the specific tree the proof was issued
 against. Implementing the equality would reject this genuine bundle and
 any others whose two indices differ.
 
-**Checkpoint signed-note name and key-ID handling are candidate prefilters,
-not authenticated log binding.** The verifier compares the signature-line
-name against the selected trusted log's `baseUrl` and compares its 4-byte key
-ID hint against the selected key's expected hint before attempting ECDSA.
-For the current public root, name matching treats one leading `https://` as
-equivalent to its scheme-less form and otherwise compares bytes exactly; it
-does not perform general URL, DNS, case, Unicode, or trailing-slash
-normalization. The expected key ID is `checkpointKeyId`, falling back as the
-TrustedRoot specification requires when that legacy field is absent.
+**Checkpoint signed-note key-ID handling is candidate selection; key-name
+handling is only an unauthenticated priority hint, not authenticated log
+binding.** The verifier first compares each signature line's 4-byte key-ID
+hint with the selected key's expected hint, then tries matching names (a
+trusted `baseUrl` with one leading `https://` is equivalent to its
+scheme-less form) before trying non-matching names with the same hint. A
+non-matching name remains fully eligible if its signature verifies. Name
+comparison otherwise uses exact bytes: no general URL, DNS, case, Unicode, or
+trailing-slash normalization. The expected key ID is `checkpointKeyId`,
+falling back as the TrustedRoot specification requires when that legacy field
+is absent.
 
-Both values are public, unauthenticated line metadata outside the signed note
-body. They are useful only to avoid cryptographic work on non-matching
-candidates; they do not identify or authenticate a deployment, bind a line to
-the checkpoint origin, or prevent cross-deployment confusion. In particular,
-an otherwise valid signature line can be relabeled with the trusted expected
-name while keeping the same note body, signature bytes, and hint, and then be
-accepted under the already-selected key. The checkpoint origin is separately
+The hint and name are public, unauthenticated line metadata outside the signed
+note body. The hint can avoid ECDSA work for unrelated keys; the name only
+orders likely candidates. Neither identifies or authenticates a deployment,
+binds a line to the checkpoint origin, or prevents cross-deployment confusion.
+An otherwise valid signature line with an arbitrary name still verifies via
+the fallback pass, and an attacker can label every decoy with the expected
+name to defeat the ordering optimization. The checkpoint origin is separately
 integrity-protected because it sits inside the signed note body. The
 checkpoint specification only says that the key name SHOULD match the origin,
 and the real `cli/cli` fixture carries origin
