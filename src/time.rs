@@ -12,8 +12,14 @@
 use crate::error::ParseError;
 
 /// Parses an RFC 3339 timestamp (`Z`/`z` or a numeric `+HH:MM`/`-HH:MM`
-/// offset; fractional seconds accepted and truncated, not rounded) and
-/// returns the corresponding unix time in seconds.
+/// offset; fractional seconds accepted and rounded UP to the next whole
+/// second) and returns the corresponding unix time in seconds.
+///
+/// Fractional seconds are rounded up (ceiling) rather than truncated. This is
+/// exact for trust-window boundary comparisons: for integer-second evidence `t`
+/// and a real boundary `b`, both `t >= b  ⟺  t >= ceil(b)` and
+/// `t < b  ⟺  t < ceil(b)` hold. Truncation would widen the start-boundary
+/// check by up to 999 ms, accepting evidence before the declared start.
 ///
 /// `field` is used only to label the resulting [`ParseError::Rfc3339`] if
 /// parsing fails.
@@ -60,13 +66,17 @@ pub(crate) fn parse_rfc3339(field: &'static str, s: &str) -> Result<i64, ParseEr
     }
 
     let mut pos = 19;
+    let mut has_nonzero_fraction = false;
 
     // Optional fractional seconds: '.' followed by one or more digits.
-    // Truncated (not rounded) since the result is whole seconds.
+    // Rounded up (ceiling) to the next whole second if any digit is nonzero.
     if bytes[pos] == b'.' {
         pos += 1;
         let frac_start = pos;
         while pos < bytes.len() && bytes[pos].is_ascii_digit() {
+            if bytes[pos] != b'0' {
+                has_nonzero_fraction = true;
+            }
             pos += 1;
         }
         if pos == frac_start {
@@ -113,7 +123,11 @@ pub(crate) fn parse_rfc3339(field: &'static str, s: &str) -> Result<i64, ParseEr
     // `offset_seconds` is how far *ahead* of UTC the local reading is, so
     // UTC = local wall-clock reading (treated as if it were UTC) minus the
     // offset.
-    Ok(days * 86_400 + time_of_day_seconds - offset_seconds)
+    let mut unix_time = days * 86_400 + time_of_day_seconds - offset_seconds;
+    if has_nonzero_fraction {
+        unix_time += 1;
+    }
+    Ok(unix_time)
 }
 
 fn expect_byte(
@@ -219,9 +233,33 @@ mod tests {
     }
 
     #[test]
-    fn truncates_fractional_seconds() -> Result<(), Box<dyn std::error::Error>> {
-        if parse_rfc3339("f", "2022-12-31T23:59:59.999Z")? != 1_672_531_199 {
-            return Err("fractional-second truncation mismatch".into());
+    fn rounds_fractional_seconds_up() -> Result<(), Box<dyn std::error::Error>> {
+        if parse_rfc3339("f", "2022-12-31T23:59:59.999Z")? != 1_672_531_200 {
+            return Err("fractional-second rounding mismatch".into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn all_zero_fraction_unchanged() -> Result<(), Box<dyn std::error::Error>> {
+        if parse_rfc3339("f", "2022-12-31T23:59:59.000Z")? != 1_672_531_199 {
+            return Err("all-zero fraction should not round up".into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn single_digit_fraction_rounds_up() -> Result<(), Box<dyn std::error::Error>> {
+        if parse_rfc3339("f", "2022-12-31T23:59:59.001Z")? != 1_672_531_200 {
+            return Err("single-digit fraction mismatch".into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn many_digit_fraction_rounds_up() -> Result<(), Box<dyn std::error::Error>> {
+        if parse_rfc3339("f", "2022-12-31T23:59:59.0000001Z")? != 1_672_531_200 {
+            return Err("many-digit fraction mismatch".into());
         }
         Ok(())
     }
