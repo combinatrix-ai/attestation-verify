@@ -51,7 +51,7 @@ use crate::bundle::Bundle;
 use crate::dsse;
 use crate::error::{ContentBindingError, Error, PolicyError, UnsupportedError};
 use crate::fulcio;
-use crate::policy::{CheckpointOriginPolicy, GithubPolicy};
+use crate::policy::{self, CheckpointOriginPolicy, GithubPolicy};
 use crate::policy_match;
 use crate::rekor;
 use crate::sct;
@@ -245,7 +245,9 @@ impl VerifierBuilder {
     /// Returns [`PolicyError::InvalidConfiguration`] if either
     /// [`VerifierBuilder::trust_store`], [`VerifierBuilder::github_policy`],
     /// or [`VerifierBuilder::checkpoint_origin_policy`] was never called,
-    /// or a policy key does not exist in the chosen trust store.
+    /// a policy key does not exist in the chosen trust store, or the
+    /// identity policy pins numeric ids on its signer repository (see
+    /// [`crate::SignerPolicy`]: no certificate claim can enforce it).
     pub fn build(self) -> Result<Verifier, Error> {
         let trust_store = self.trust_store.ok_or_else(|| {
             Error::Policy(PolicyError::InvalidConfiguration(
@@ -262,6 +264,9 @@ impl VerifierBuilder {
                 "checkpoint_origin_policy is required".to_owned(),
             ))
         })?;
+        // `GithubPolicy`'s fields are public, so a policy reaching this
+        // point need not have come from `GithubPolicyBuilder::build`.
+        policy::reject_signer_id_pins(&github_policy.signer)?;
         for binding in checkpoint_origin_policy.bindings() {
             let known_key = trust_store
                 .tlogs
@@ -378,4 +383,53 @@ pub struct TrustSnapshotInfo {
     /// `"embedded-public-good"` or `"external"`
     /// ([`crate::trust::TrustStore::source`]).
     pub source: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Verifier;
+    use crate::error::{Error, PolicyError};
+    use crate::policy::{
+        CheckpointOriginPolicy, GithubPolicy, RefPolicy, RepositoryIdentity, SignerPolicy,
+        SourcePolicy, WorkflowPath, WorkflowRevisionPolicy,
+    };
+    use crate::trust::TrustStore;
+
+    #[test]
+    fn builder_rejects_directly_constructed_signer_id_pins()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let trust_store = TrustStore::embedded_public_good()?;
+        let log = trust_store
+            .tlogs
+            .first()
+            .ok_or("embedded trust root has no Rekor log")?;
+        let origin_policy = CheckpointOriginPolicy::for_log(log, ["rekor.sigstore.dev - 1"])?;
+        // Bypasses `GithubPolicyBuilder::build`, which is exactly the
+        // path this check exists for.
+        let policy = GithubPolicy {
+            source: SourcePolicy {
+                repository: RepositoryIdentity::parse("combinatrix-ai/dlgt")?,
+                git_ref: RefPolicy::Exact("refs/tags/v0.4.0".to_owned()),
+                commit: None,
+            },
+            signer: SignerPolicy {
+                repository: RepositoryIdentity::parse("combinatrix-ai/dlgt")?
+                    .with_owner_id(1)
+                    .with_repository_id(2),
+                path: WorkflowPath::new(".github/workflows/release.yml")?,
+                revision: WorkflowRevisionPolicy::Any,
+            },
+        };
+        let result = Verifier::builder()
+            .trust_store(trust_store)
+            .github_policy(policy)
+            .checkpoint_origin_policy(origin_policy)
+            .build();
+        match result {
+            Err(Error::Policy(PolicyError::InvalidConfiguration(_))) => Ok(()),
+            other => {
+                Err(format!("expected PolicyError::InvalidConfiguration, got {other:?}").into())
+            }
+        }
+    }
 }

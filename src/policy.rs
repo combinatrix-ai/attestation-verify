@@ -301,7 +301,9 @@ impl GithubPolicyBuilder {
     ///
     /// Returns [`PolicyError::InvalidConfiguration`] if either
     /// [`GithubPolicyBuilder::source`] or [`GithubPolicyBuilder::signer`]
-    /// was never called.
+    /// was never called, or if the signer repository pins a numeric owner
+    /// or repository id (see [`SignerPolicy`]: no certificate claim can
+    /// enforce it).
     pub fn build(self) -> Result<GithubPolicy, Error> {
         let source = self
             .source
@@ -309,8 +311,27 @@ impl GithubPolicyBuilder {
         let signer = self
             .signer
             .ok_or_else(|| policy_error("signer policy is required".to_owned()))?;
+        reject_signer_id_pins(&signer)?;
         Ok(GithubPolicy { source, signer })
     }
+}
+
+/// Rejects a signer policy that pins numeric ids.
+///
+/// [`GithubPolicy`]'s fields are public, so a caller can assemble one
+/// without [`GithubPolicyBuilder`]; every path that turns a policy into
+/// something enforceable must run this check.
+pub(crate) fn reject_signer_id_pins(signer: &SignerPolicy) -> Result<(), Error> {
+    if signer.repository.owner_id().is_some() || signer.repository.repository_id().is_some() {
+        return Err(policy_error(
+            "signer repository numeric id pins cannot be enforced: a Fulcio certificate carries \
+             no authenticated signer-repository owner or repository id claim, only the signer's \
+             owner/name in the SAN URI. Remove with_owner_id/with_repository_id from the signer \
+             repository (source-side numeric id pins are enforced)"
+                .to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 /// Where the code must come from: a repository, a ref policy, and
@@ -331,6 +352,16 @@ pub struct SourcePolicy {
 /// Kept separate from [`SourcePolicy`] because reusable workflows make
 /// "repository + workflow path" alone ambiguous: the workflow file can
 /// live in a different repository than the code it signed for.
+///
+/// The signer repository is matched by owner/name only. A Fulcio
+/// certificate authenticates numeric ids for the *source* repository
+/// alone; nothing in it identifies the signer repository beyond the SAN
+/// URI's owner/name. A signer repository pinned with
+/// [`RepositoryIdentity::with_owner_id`] or
+/// [`RepositoryIdentity::with_repository_id`] is therefore rejected at
+/// [`GithubPolicyBuilder::build`] and [`crate::VerifierBuilder::build`]
+/// rather than accepted and ignored, which would hand the caller a
+/// rename/transfer protection they do not have.
 #[derive(Debug, Clone)]
 pub struct SignerPolicy {
     /// The repository the signing workflow lives in.
@@ -346,9 +377,12 @@ pub struct SignerPolicy {
 ///
 /// Numeric owner id protects against owner rename/recreation; numeric
 /// repository id protects against repository rename, transfer, or
-/// recreation. Fields are private and validated at construction: an
-/// empty owner or name is rejected, so any `RepositoryIdentity` you can
-/// hold is well-formed.
+/// recreation. Both are enforced for [`SourcePolicy`] only, where the
+/// certificate carries the matching authenticated claims; pinning either
+/// on a [`SignerPolicy`] is rejected as unenforceable when the policy is
+/// built. Fields are private and validated at construction: an empty
+/// owner or name is rejected, so any `RepositoryIdentity` you can hold is
+/// well-formed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepositoryIdentity {
     owner: String,
@@ -406,6 +440,10 @@ impl RepositoryIdentity {
 
     /// Pins the numeric owner id (protects against owner
     /// rename/recreation).
+    ///
+    /// Enforced for a [`SourcePolicy`] repository only; a
+    /// [`SignerPolicy`] repository carrying this pin is rejected when the
+    /// policy is built.
     #[must_use]
     pub fn with_owner_id(mut self, owner_id: u64) -> Self {
         self.owner_id = Some(owner_id);
@@ -414,6 +452,10 @@ impl RepositoryIdentity {
 
     /// Pins the numeric repository id (protects against repository
     /// rename/transfer/recreation).
+    ///
+    /// Enforced for a [`SourcePolicy`] repository only; a
+    /// [`SignerPolicy`] repository carrying this pin is rejected when the
+    /// policy is built.
     #[must_use]
     pub fn with_repository_id(mut self, repository_id: u64) -> Self {
         self.repository_id = Some(repository_id);
@@ -636,6 +678,45 @@ mod tests {
             .signer(signer)
             .build()?;
         Ok(())
+    }
+
+    #[test]
+    fn github_policy_builder_rejects_signer_owner_id_pin() -> Result<(), Box<dyn std::error::Error>>
+    {
+        expect_policy_error(
+            GithubPolicy::builder()
+                .source(unpinned_source()?)
+                .signer(SignerPolicy {
+                    repository: RepositoryIdentity::parse("combinatrix-ai/dlgt")?.with_owner_id(1),
+                    path: WorkflowPath::new(".github/workflows/release.yml")?,
+                    revision: WorkflowRevisionPolicy::Any,
+                })
+                .build(),
+        )
+    }
+
+    #[test]
+    fn github_policy_builder_rejects_signer_repository_id_pin()
+    -> Result<(), Box<dyn std::error::Error>> {
+        expect_policy_error(
+            GithubPolicy::builder()
+                .source(unpinned_source()?)
+                .signer(SignerPolicy {
+                    repository: RepositoryIdentity::parse("combinatrix-ai/dlgt")?
+                        .with_repository_id(2),
+                    path: WorkflowPath::new(".github/workflows/release.yml")?,
+                    revision: WorkflowRevisionPolicy::Any,
+                })
+                .build(),
+        )
+    }
+
+    fn unpinned_source() -> Result<SourcePolicy, Error> {
+        Ok(SourcePolicy {
+            repository: RepositoryIdentity::parse("combinatrix-ai/dlgt")?,
+            git_ref: RefPolicy::Exact("refs/tags/v0.4.0".to_owned()),
+            commit: None,
+        })
     }
 
     #[test]

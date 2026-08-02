@@ -74,6 +74,9 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn std::error:
 
     let bundle = load_bundle(&std::fs::read(bundle_path)?)?;
 
+    // Numeric ids are enforceable for the source repository only, so the
+    // signer half keeps the unpinned identity.
+    let signer_repository = RepositoryIdentity::parse(&repo)?;
     let mut repository = RepositoryIdentity::parse(&repo)?;
     if let Some(id) = owner_id {
         repository = repository.with_owner_id(id);
@@ -84,12 +87,12 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn std::error:
     let git_ref = source_ref.map_or_else(|| RefPolicy::Glob("*".to_owned()), RefPolicy::Exact);
     let policy = GithubPolicy::builder()
         .source(SourcePolicy {
-            repository: repository.clone(),
+            repository,
             git_ref,
             commit: None,
         })
         .signer(SignerPolicy {
-            repository,
+            repository: signer_repository,
             path: WorkflowPath::new(signer_workflow)?,
             revision: WorkflowRevisionPolicy::Any,
         })
