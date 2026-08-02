@@ -563,6 +563,15 @@ pub enum ResourceLimitError {
         limit: usize,
     },
 
+    /// A JSON document parsed to more `serde_json::Value` nodes than the
+    /// limit. Carries no actual count: parsing stops at the limit rather
+    /// than walking the rest of the input to total it up.
+    #[error("JSON document exceeds the limit of {limit} value nodes")]
+    TooManyJsonNodes {
+        /// The maximum accepted number of value nodes.
+        limit: usize,
+    },
+
     /// A bundle carried more transparency-log entries than the limit.
     #[error("{actual} tlog entries exceeds the limit of {limit}")]
     TooManyTlogEntries {

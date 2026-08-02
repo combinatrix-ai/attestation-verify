@@ -9,6 +9,19 @@
 /// `from_json_lines` / `from_github_response` input.
 pub const MAX_INPUT_BYTES: usize = 8 * 1024 * 1024;
 
+/// Maximum number of `serde_json::Value` nodes in a single strict-parsed
+/// JSON document (every scalar, every array element, every object member
+/// value, and every container itself).
+///
+/// [`MAX_INPUT_BYTES`] alone does not bound the parsed tree: a `Value` node
+/// costs on the order of 50-100 bytes, so a compact input of scalars (`0,`
+/// is two bytes) expands by more than an order of magnitude. Unknown fields
+/// are tolerated by design, which makes that expansion reachable on an
+/// otherwise valid bundle. This cap bounds the tree to tens of megabytes.
+/// The golden fixture parses to a few thousand nodes, so the headroom is as
+/// generous as the other limits here.
+pub const MAX_JSON_NODES: usize = 262_144;
+
 /// Maximum number of transparency-log entries in a single bundle.
 pub const MAX_TLOG_ENTRIES: usize = 32;
 
