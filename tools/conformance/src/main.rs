@@ -1,4 +1,5 @@
-//! Verification-only client for the official `sigstore-conformance` suite.
+//! Repository-only verification client for the official
+//! `sigstore-conformance` suite.
 //!
 //! The conformance protocol is intentionally broader than this crate: it
 //! includes signing and verification with caller-managed keys. This binary

@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "attestation-verify"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "base64",
  "der",
@@ -19,6 +19,14 @@ dependencies = [
  "spki",
  "thiserror",
  "x509-cert",
+]
+
+[[package]]
+name = "attestation-verify-conformance"
+version = "0.0.0"
+dependencies = [
+ "attestation-verify",
+ "serde_json",
 ]
 
 [[package]]

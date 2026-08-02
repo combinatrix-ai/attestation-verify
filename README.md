@@ -72,7 +72,8 @@ cargo run --example verify -- \
     --bundle tests/fixtures/github-cli/tarball-user-slsa-provenance.json \
     --repo cli/cli --owner-id 59704711 --repo-id 212613049 \
     --source-ref refs/heads/trunk \
-    --signer-workflow .github/workflows/deployment.yml
+    --signer-workflow .github/workflows/deployment.yml \
+    --checkpoint-origin 'rekor.sigstore.dev - 1193050959916656506'
 ```
 
 ## v0.2 boundaries (out of scope today, typed `Unsupported` errors, never
@@ -120,13 +121,14 @@ git clone --depth=1 https://github.com/sigstore/sigstore-conformance.git "$suite
 uv venv "$suite_dir/.venv"
 uv pip install --python "$suite_dir/.venv/bin/python" \
     --requirement "$suite_dir/requirements.txt"
-cargo build --locked --release --bin conformance
+cargo build --locked --release --package attestation-verify-conformance
 xfail="$(awk -F '\t' '!/^[[:space:]]*#/ && NF >= 2 { print $1 }' \
     tests/conformance-expected-failures.txt | paste -sd ' ' -)"
 GHA_SIGSTORE_CONFORMANCE_SKIP_CPYTHON_RELEASE_TESTS=true \
 GHA_SIGSTORE_CONFORMANCE_XFAIL="$xfail" \
     "$suite_dir/.venv/bin/python" -m pytest -q "$suite_dir/test" \
-    --entrypoint "$crate_dir/target/release/conformance" --skip-signing
+    --entrypoint "$crate_dir/target/release/attestation-verify-conformance" \
+    --skip-signing
 ```
 
 ## Development
@@ -135,8 +137,8 @@ The minimum supported Rust version is 1.88. Run the same checks as CI from
 the repository root:
 
 ```sh
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 cargo test --locked
 ```
@@ -184,6 +186,16 @@ unit, fixture, and differential tests.
 The weekly/manual differential gate runs `scripts/differential.sh` against a
 real `cli/cli` release and its tampered copy. It requires an authenticated
 `gh` CLI and network access, so it is not part of the local unit-test suite.
+
+## Embedded trust root
+
+`TrustStore::embedded_public_good()` is a pinned snapshot: this sans-io crate
+does not fetch or refresh trust material at runtime. We update the snapshot
+and publish a patch release when the upstream Sigstore public-good root
+changes. Applications that need a different or newer root can parse a
+caller-supplied trusted-root document instead. Monitor release notes before
+long-lived deployments so an upstream key rotation does not leave the
+embedded snapshot stale.
 
 ## Disclaimer
 

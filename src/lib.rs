@@ -39,6 +39,8 @@
 //!   [`Verifier::verify_digest`] / [`Verifier::verify_bytes`] return a
 //!   [`verifier::VerificationReport`] on success.
 
+#![forbid(unsafe_code)]
+
 pub mod bundle;
 pub mod error;
 pub mod policy;
