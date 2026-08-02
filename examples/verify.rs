@@ -9,7 +9,8 @@
 //!     --bundle tarball-user-slsa-provenance.json \
 //!     --repo cli/cli --owner-id 59704711 --repo-id 212613049 \
 //!     --source-ref refs/heads/trunk \
-//!     --signer-workflow .github/workflows/deployment.yml
+//!     --signer-workflow .github/workflows/deployment.yml \
+//!     --checkpoint-origin 'rekor.sigstore.dev - 1193050959916656506'
 //! ```
 //!
 //! `--repo` names both the source repository and the signer-workflow's
@@ -22,8 +23,9 @@
 use std::process::ExitCode;
 
 use attestation_verify::{
-    Bundle, BundleSet, GithubPolicy, RefPolicy, RepositoryIdentity, SignerPolicy, SourcePolicy,
-    Subject, TrustStore, VerificationReport, Verifier, WorkflowPath, WorkflowRevisionPolicy,
+    Bundle, BundleSet, CheckpointOriginPolicy, GithubPolicy, RefPolicy, RepositoryIdentity,
+    SignerPolicy, SourcePolicy, Subject, TrustStore, VerificationReport, Verifier, WorkflowPath,
+    WorkflowRevisionPolicy,
 };
 
 fn main() -> ExitCode {
@@ -38,7 +40,8 @@ fn main() -> ExitCode {
 
 fn run(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn std::error::Error>> {
     let (mut artifact, mut digest, mut bundle_path, mut repo) = (None, None, None, None);
-    let (mut owner_id, mut repo_id, mut source_ref, mut signer_workflow) = (None, None, None, None);
+    let (mut owner_id, mut repo_id, mut source_ref, mut signer_workflow, mut checkpoint_origin) =
+        (None, None, None, None, None);
 
     while let Some(flag) = args.next() {
         match flag.as_str() {
@@ -50,6 +53,7 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn std::error:
             "--repo-id" => repo_id = Some(next_value(&mut args, &flag)?.parse::<u64>()?),
             "--source-ref" => source_ref = Some(next_value(&mut args, &flag)?),
             "--signer-workflow" => signer_workflow = Some(next_value(&mut args, &flag)?),
+            "--checkpoint-origin" => checkpoint_origin = Some(next_value(&mut args, &flag)?),
             other => return Err(format!("unknown argument: {other}").into()),
         }
     }
@@ -65,6 +69,8 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn std::error:
     let bundle_path = bundle_path.ok_or("missing required --bundle <path>")?;
     let repo = repo.ok_or("missing required --repo <owner/name>")?;
     let signer_workflow = signer_workflow.ok_or("missing required --signer-workflow <path>")?;
+    let checkpoint_origin =
+        checkpoint_origin.ok_or("missing required --checkpoint-origin <origin>")?;
 
     let bundle = load_bundle(&std::fs::read(bundle_path)?)?;
 
@@ -88,9 +94,18 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn std::error:
             revision: WorkflowRevisionPolicy::Any,
         })
         .build()?;
+    let trust_store = TrustStore::embedded_public_good()?;
+    let log = trust_store
+        .tlogs
+        .first()
+        .ok_or("embedded trust root has no Rekor log")?;
+    let checkpoint_origin_policy = CheckpointOriginPolicy::builder()
+        .allow_origin(log, checkpoint_origin)?
+        .build()?;
     let verifier = Verifier::builder()
-        .trust_store(TrustStore::embedded_public_good()?)
+        .trust_store(trust_store)
         .github_policy(policy)
+        .checkpoint_origin_policy(checkpoint_origin_policy)
         .build()?;
 
     let report = verifier.verify_digest(&subject, &bundle)?;

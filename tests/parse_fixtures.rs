@@ -6,10 +6,13 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 use attestation_verify::{
-    BUNDLE_MEDIA_TYPE, Bundle, BundleSet, ContentBindingError, Error, GithubPolicy, ParseError,
-    RefPolicy, RepositoryIdentity, ResourceLimitError, SignerPolicy, SourcePolicy, Subject,
-    TrustStore, UnsupportedError, Verifier, WorkflowPath, WorkflowRevisionPolicy,
+    BUNDLE_MEDIA_TYPE, Bundle, BundleSet, CheckpointOriginPolicy, ContentBindingError, Error,
+    GithubPolicy, ParseError, RefPolicy, RepositoryIdentity, ResourceLimitError, SignerPolicy,
+    SourcePolicy, Subject, TrustStore, UnsupportedError, Verifier, WorkflowPath,
+    WorkflowRevisionPolicy,
 };
+
+const REKOR_V1_ORIGIN: &str = "rekor.sigstore.dev - 1193050959916656506";
 
 fn fixture_path(relative: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -242,9 +245,20 @@ fn matching_cli_cli_policy() -> Result<GithubPolicy, Box<dyn std::error::Error>>
 #[test]
 fn verifier_succeeds_on_real_bundle_with_matching_policy() -> Result<(), Box<dyn std::error::Error>>
 {
+    let trust_store = TrustStore::embedded_public_good()?;
+    let checkpoint_origin_policy = CheckpointOriginPolicy::builder()
+        .allow_origin(
+            trust_store
+                .tlogs
+                .first()
+                .ok_or("missing trusted Rekor log")?,
+            REKOR_V1_ORIGIN,
+        )?
+        .build()?;
     let verifier = Verifier::builder()
-        .trust_store(TrustStore::embedded_public_good()?)
+        .trust_store(trust_store)
         .github_policy(matching_cli_cli_policy()?)
+        .checkpoint_origin_policy(checkpoint_origin_policy)
         .build()?;
 
     let bundle = Bundle::from_json(&read_fixture(
@@ -271,9 +285,20 @@ fn verify_bytes_fails_closed_when_hashed_artifact_is_not_a_subject()
     // `tarball-user-slsa-provenance.json`'s 21 subjects (confirmed by
     // `tarball_user_slsa_provenance_parses` above), regardless of policy:
     // `verify_bytes` must still fail closed on subject binding.
+    let trust_store = TrustStore::embedded_public_good()?;
+    let checkpoint_origin_policy = CheckpointOriginPolicy::builder()
+        .allow_origin(
+            trust_store
+                .tlogs
+                .first()
+                .ok_or("missing trusted Rekor log")?,
+            REKOR_V1_ORIGIN,
+        )?
+        .build()?;
     let verifier = Verifier::builder()
-        .trust_store(TrustStore::embedded_public_good()?)
+        .trust_store(trust_store)
         .github_policy(matching_cli_cli_policy()?)
+        .checkpoint_origin_policy(checkpoint_origin_policy)
         .build()?;
 
     let bundle = Bundle::from_json(&read_fixture(

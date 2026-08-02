@@ -215,6 +215,15 @@ Deployment/origin binding is a separate follow-up.
 
 The 4-byte key-ID hint is public, so an attacker can copy it onto every decoy
 line; `MAX_CHECKPOINT_SIGNATURES` remains the hard bound on cryptographic work.
+Checkpoint deployment/origin binding is a separate caller policy. The public
+`CheckpointOriginPolicy` maps the SHA-256 digest of each selected log key's raw
+SPKI bytes to one or more exact, opaque signed-origin strings. A verifier must
+receive a non-empty policy; builder validation rejects bindings whose key is
+absent from the selected `TrustStore`. Every origin is compared byte-for-byte
+after checkpoint tree/root binding and signature verification. Empty origins
+and origins containing CR or LF are invalid policy configuration. The policy
+never derives an origin from `baseUrl`, and mutating a signed origin still
+fails checkpoint signature verification before policy comparison.
 
 ## X.509 / Fulcio validation profile (normative)
 
@@ -269,6 +278,7 @@ use attestation_verify::{Bundle, BundleSet, GithubPolicy, TrustStore, Verifier};
 let verifier = Verifier::builder()
     .trust_store(TrustStore::embedded_public_good())
     .github_policy(policy)                       // validated here, once
+    .checkpoint_origin_policy(origin_policy)     // exact origin-to-SPKI map
     .build()?;
 
 let bundle = Bundle::from_json(&bundle_bytes)?;  // exactly one bundle

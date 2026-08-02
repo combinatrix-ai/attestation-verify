@@ -19,11 +19,13 @@ public-good trust root (or a caller-supplied one):
   identity-policy matching (source repository + ref, signer workflow
   repository + path + revision).
 
-There are no verification knobs — every step above always runs. The only
-configuration is *which identity to require* (`GithubPolicy`).
+There are no verification knobs — every step above always runs. The caller
+must provide both the identity policy (`GithubPolicy`) and a non-empty exact
+checkpoint-origin policy (`CheckpointOriginPolicy`); the latter is validated
+against the selected trust store's log-key SPKI digests at builder time.
 
 ```rust
-use attestation_verify::{Bundle, GithubPolicy, RefPolicy, RepositoryIdentity};
+use attestation_verify::{Bundle, CheckpointOriginPolicy, GithubPolicy, RefPolicy, RepositoryIdentity};
 use attestation_verify::{SignerPolicy, SourcePolicy, TrustStore, Verifier, WorkflowPath};
 use attestation_verify::WorkflowRevisionPolicy;
 
@@ -42,9 +44,18 @@ let policy = GithubPolicy::builder()
     })
     .build()?;
 
+let trust_store = TrustStore::embedded_public_good()?;
+let rekor_log = trust_store
+    .tlogs
+    .first()
+    .ok_or("embedded trust root has no Rekor log")?;
+let origin_policy = CheckpointOriginPolicy::builder()
+    .allow_origin(rekor_log, "rekor.sigstore.dev - 1193050959916656506")?
+    .build()?;
 let verifier = Verifier::builder()
-    .trust_store(TrustStore::embedded_public_good()?)
+    .trust_store(trust_store)
     .github_policy(policy)
+    .checkpoint_origin_policy(origin_policy)
     .build()?;
 
 let bundle = Bundle::from_json(&bundle_bytes)?;

@@ -354,6 +354,14 @@ pub enum TransparencyError {
     /// trusted log key.
     #[error("no checkpoint signature verified with the trusted log key")]
     CheckpointSignatureInvalid,
+
+    /// The checkpoint signature authenticated successfully, but its opaque
+    /// origin was not allowed for the selected trusted log-key identity.
+    ///
+    /// This intentionally carries no origin or key material so an attacker
+    /// cannot use verification errors as an oracle for policy contents.
+    #[error("checkpoint origin is not allowed for the trusted log key")]
+    CheckpointOriginMismatch,
 }
 
 /// RFC 3161 timestamp verification failures.

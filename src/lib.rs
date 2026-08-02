@@ -13,9 +13,9 @@
 //! `https://slsa.dev/provenance/v1` predicate, verified against the
 //! embedded Sigstore public-good trust root or a caller-supplied one.
 //! [`Verifier::verify_digest`] / [`Verifier::verify_bytes`] report success
-//! only once every step of that chain has verified; there are no
-//! verification knobs, only identity policy (DESIGN.md "Core decisions"
-//! item 2).
+//! only once every step of that chain has verified; the caller supplies an
+//! identity policy and an exact checkpoint-origin policy (DESIGN.md "Core
+//! decisions" item 2).
 //!
 //! Out of scope for now (typed [`UnsupportedError`], never silently
 //! accepted): GitHub's own TSA-timestamped release-attestation flavor
@@ -33,6 +33,8 @@
 //! - [`Statement`]: the in-toto statement inside a bundle's DSSE payload.
 //! - [`TrustStore`]: a parsed trusted-root document.
 //! - [`GithubPolicy`]: the identity policy a [`Verifier`] enforces.
+//! - [`CheckpointOriginPolicy`]: exact signed checkpoint origins bound to
+//!   trusted log-key SPKI digests.
 //! - [`Verifier`]: the verification entry point;
 //!   [`Verifier::verify_digest`] / [`Verifier::verify_bytes`] return a
 //!   [`verifier::VerificationReport`] on success.
@@ -70,8 +72,9 @@ pub use error::{
     TimestampError, TransparencyError, TrustError, UnsupportedError,
 };
 pub use policy::{
-    CommitSha, GithubPolicy, GithubPolicyBuilder, RefPolicy, RepositoryIdentity, SignerPolicy,
-    SourcePolicy, WorkflowPath, WorkflowRevisionPolicy,
+    CheckpointOriginBinding, CheckpointOriginPolicy, CheckpointOriginPolicyBuilder, CommitSha,
+    GithubPolicy, GithubPolicyBuilder, RefPolicy, RepositoryIdentity, SignerPolicy, SourcePolicy,
+    WorkflowPath, WorkflowRevisionPolicy,
 };
 pub use statement::{STATEMENT_TYPE, Statement, StatementSubject};
 pub use subject::Subject;

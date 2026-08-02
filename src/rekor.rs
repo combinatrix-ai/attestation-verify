@@ -38,7 +38,9 @@
 //! 64-byte r||s) behind a 4-byte key hint. The hint is attacker-controlled
 //! candidate metadata used to avoid trying unrelated keys; the signature-line
 //! name is an attacker-controlled priority hint used to try likely candidates
-//! first. Neither field authenticates a deployment or log identity.
+//! first. Neither field authenticates a deployment or log identity. The
+//! origin is retained from the signed body and checked against the caller's
+//! [`CheckpointOriginPolicy`] only after the selected key verifies it.
 
 use sha2::{Digest, Sha256};
 
@@ -50,6 +52,7 @@ use crate::error::{
 };
 use crate::limits;
 use crate::parse_util;
+use crate::policy::CheckpointOriginPolicy;
 use crate::strict_json;
 use crate::trust::{TransparencyLog, TrustStore, ValidityPeriod};
 
@@ -437,6 +440,7 @@ const CHECKPOINT_SIGNATURE_PREFIX: &str = "\u{2014} ";
 /// The truncated key identifier carried ahead of each signed-note signature.
 const CHECKPOINT_KEY_HINT_BYTES: usize = 4;
 
+#[derive(Debug)]
 struct CheckpointSignature<'a> {
     /// The attacker-controlled signature-line key name. It is not covered by
     /// the signed note and is used only to prioritize candidates
@@ -447,7 +451,12 @@ struct CheckpointSignature<'a> {
 }
 
 /// A parsed checkpoint (signed note) envelope.
+#[derive(Debug)]
 pub(crate) struct ParsedCheckpoint<'a> {
+    /// The opaque origin line from the signed note body.  It is retained
+    /// byte-for-byte (apart from UTF-8's inherent representation) so the
+    /// caller can compare it only after signature authentication.
+    origin: &'a str,
     tree_size: u64,
     root_hash: Vec<u8>,
     /// The note body: `<origin>\n<treeSize>\n<rootHash>\n` plus any
@@ -471,18 +480,15 @@ pub(crate) fn parse_checkpoint(envelope: &str) -> Result<ParsedCheckpoint<'_>, E
     let body_text = &envelope[..blank_line_at];
     let signature_text = &envelope[blank_line_at + 2..];
 
-    let mut body_lines = body_text.lines();
-    // The origin is required to be present but is deliberately *not* used
-    // as a log selector (`DESIGN.md` "Rekor-entry <-> bundle binding").
-    // It is inside the note body, so tampering with it fails the signature
-    // check; the signed-note specification only says the key name SHOULD
-    // match it, and the real `cli/cli` fixture carries origin
-    // `rekor.sigstore.dev - 1193050959916656506` against key name
-    // `rekor.sigstore.dev` and `baseUrl` `https://rekor.sigstore.dev`.
-    // Requiring any two of those three to be equal rejects genuine bundles.
-    let _origin = body_lines
-        .next()
+    // Keep the origin's exact bytes.  `str::lines()` strips a trailing `\r`,
+    // which would silently normalize a signed origin before policy matching.
+    let (origin, body_without_origin) = body_text
+        .split_once('\n')
         .ok_or_else(|| malformed("missing origin line"))?;
+    if origin.is_empty() {
+        return Err(malformed("missing origin line"));
+    }
+    let mut body_lines = body_without_origin.lines();
     let tree_size_line = body_lines
         .next()
         .ok_or_else(|| malformed("missing treeSize line"))?;
@@ -546,6 +552,7 @@ pub(crate) fn parse_checkpoint(envelope: &str) -> Result<ParsedCheckpoint<'_>, E
     }
 
     Ok(ParsedCheckpoint {
+        origin,
         tree_size,
         root_hash,
         note_body,
@@ -595,8 +602,8 @@ fn checkpoint_key_name_matches(log: &TransparencyLog, name: &str) -> bool {
 /// priority hint; both are outside the signed note body and unauthenticated.
 /// A valid signature line with an arbitrary name therefore still verifies via
 /// the fallback pass, and an attacker can label every decoy with the expected
-/// name to defeat the ordering optimization. This branch deliberately does
-/// not implement deployment/origin binding.
+/// name to defeat the ordering optimization. Deployment/origin binding is
+/// performed by [`verify_tlog_entry`] using the caller's policy.
 ///
 /// # Errors
 ///
@@ -608,14 +615,15 @@ fn checkpoint_key_name_matches(log: &TransparencyLog, name: &str) -> bool {
 /// [`TransparencyError::CheckpointRootHashMismatch`] on a mismatch
 /// against `proof_tree_size` / `proof_root_hash`, and
 /// [`TransparencyError::CheckpointSignatureInvalid`] if no signature line
-/// verifies.
-pub(crate) fn verify_checkpoint(
-    envelope: &str,
+/// verifies.  On success, returns the authenticated parsed checkpoint so the
+/// caller can apply origin policy *after* this cryptographic check.
+pub(crate) fn verify_checkpoint<'a>(
+    envelope: &'a str,
     proof_tree_size: u64,
     proof_root_hash: &[u8],
     log: &TransparencyLog,
     log_key: &EcdsaVerifyingKey,
-) -> Result<(), Error> {
+) -> Result<ParsedCheckpoint<'a>, Error> {
     let checkpoint = parse_checkpoint(envelope)?;
     if checkpoint.tree_size != proof_tree_size {
         return Err(Error::Transparency(
@@ -646,7 +654,7 @@ pub(crate) fn verify_checkpoint(
             .filter(|signature| !checkpoint_key_name_matches(log, signature.name))
             .any(|signature| log_key.verify_der(note_body_bytes, &signature.signature));
     if verified {
-        Ok(())
+        Ok(checkpoint)
     } else {
         Err(Error::Transparency(
             TransparencyError::CheckpointSignatureInvalid,
@@ -673,7 +681,7 @@ pub(crate) fn verify_checkpoint_self_anchored(
 ) -> Result<(), Error> {
     let checkpoint = parse_checkpoint(envelope)?;
     let (tree_size, root_hash) = (checkpoint.tree_size, checkpoint.root_hash.clone());
-    verify_checkpoint(envelope, tree_size, &root_hash, log, log_key)
+    verify_checkpoint(envelope, tree_size, &root_hash, log, log_key).map(|_| ())
 }
 
 // ---------------------------------------------------------------------
@@ -761,6 +769,7 @@ pub(crate) struct VerifiedTimestamp {
 pub(crate) fn verify_tlog_entry(
     bundle: &Bundle,
     trust_store: &TrustStore,
+    checkpoint_origin_policy: &CheckpointOriginPolicy,
 ) -> Result<VerifiedTimestamp, Error> {
     let tlog_entries = &bundle.verification_material.tlog_entries;
     let tlog_entry = match tlog_entries.as_slice() {
@@ -796,13 +805,24 @@ pub(crate) fn verify_tlog_entry(
     verify_inclusion_proof(&tlog_entry.canonicalized_body, inclusion_proof)?;
 
     // 4. Checkpoint (signed note), anchored to the same trusted log key.
-    verify_checkpoint(
+    let checkpoint = verify_checkpoint(
         &inclusion_proof.checkpoint.envelope,
         inclusion_proof.tree_size,
         &inclusion_proof.root_hash,
         log,
         &log_key,
     )?;
+
+    // The checkpoint's origin is compared only after its signed note has
+    // authenticated under the selected key.  A mutated origin therefore
+    // remains `CheckpointSignatureInvalid`, while an authenticated but
+    // disallowed origin receives the deliberately opaque mismatch error.
+    let selected_key_id: [u8; 32] = Sha256::digest(&log.public_key.raw_bytes).into();
+    if !checkpoint_origin_policy.allows(&selected_key_id, checkpoint.origin) {
+        return Err(Error::Transparency(
+            TransparencyError::CheckpointOriginMismatch,
+        ));
+    }
 
     // 5. Time window: only now is integratedTime authenticated enough to
     // use for certificate/log-key validity.
@@ -877,8 +897,8 @@ mod tests {
     };
     use crate::limits;
     use crate::policy::{
-        GithubPolicy, RefPolicy, RepositoryIdentity, SignerPolicy, SourcePolicy, WorkflowPath,
-        WorkflowRevisionPolicy,
+        CheckpointOriginPolicy, GithubPolicy, RefPolicy, RepositoryIdentity, SignerPolicy,
+        SourcePolicy, WorkflowPath, WorkflowRevisionPolicy,
     };
     use crate::subject::Subject;
     use crate::trust::{TrustStore, ValidityPeriod};
@@ -904,6 +924,19 @@ mod tests {
         Ok(TrustStore::embedded_public_good()?)
     }
 
+    fn fixture_origin_policy(
+        trust_store: &TrustStore,
+    ) -> Result<CheckpointOriginPolicy, Box<dyn std::error::Error>> {
+        let log = trust_store
+            .tlogs
+            .iter()
+            .find(|log| log.base_url == "https://rekor.sigstore.dev")
+            .ok_or("missing fixture Rekor v1 key")?;
+        Ok(CheckpointOriginPolicy::builder()
+            .allow_origin(log, "rekor.sigstore.dev - 1193050959916656506")?
+            .build()?)
+    }
+
     fn verifier_with_correct_policy() -> Result<Verifier, Box<dyn std::error::Error>> {
         let policy = GithubPolicy::builder()
             .source(SourcePolicy {
@@ -919,9 +952,11 @@ mod tests {
                 revision: WorkflowRevisionPolicy::Any,
             })
             .build()?;
+        let trust_store = embedded_trust_store()?;
         Ok(Verifier::builder()
-            .trust_store(embedded_trust_store()?)
+            .trust_store(trust_store.clone())
             .github_policy(policy)
+            .checkpoint_origin_policy(fixture_origin_policy(&trust_store)?)
             .build()?)
     }
 
@@ -1139,7 +1174,7 @@ mod tests {
         let VerifiedTimestamp {
             integrated_time,
             log_index,
-        } = verify_tlog_entry(&bundle, &trust_store)?;
+        } = verify_tlog_entry(&bundle, &trust_store, &fixture_origin_policy(&trust_store)?)?;
         if integrated_time != 1_783_027_755 {
             return Err(format!("unexpected integratedTime: {integrated_time}").into());
         }
@@ -1445,7 +1480,7 @@ mod tests {
             Ok(())
         })?;
         let trust_store = embedded_trust_store()?;
-        match verify_tlog_entry(&bundle, &trust_store) {
+        match verify_tlog_entry(&bundle, &trust_store, &fixture_origin_policy(&trust_store)?) {
             Err(Error::Transparency(TransparencyError::InclusionProofMissing)) => Ok(()),
             other => Err(format!("expected InclusionProofMissing, got {other:?}").into()),
         }
@@ -1911,7 +1946,7 @@ mod tests {
             Ok(())
         })?;
         let trust_store = embedded_trust_store()?;
-        match verify_tlog_entry(&bundle, &trust_store) {
+        match verify_tlog_entry(&bundle, &trust_store, &fixture_origin_policy(&trust_store)?) {
             Err(Error::Transparency(TransparencyError::NoTlogEntries)) => Ok(()),
             other => Err(format!("expected NoTlogEntries, got {other:?}").into()),
         }
