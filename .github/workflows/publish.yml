@@ -1,12 +1,9 @@
 name: Publish crate
 
 on:
-  workflow_dispatch:
-    inputs:
-      version:
-        description: Version to publish, without the v prefix
-        required: true
-        type: string
+  push:
+    tags:
+      - "v*"
 
 permissions:
   contents: read
@@ -21,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: crates-io
     steps:
-      - name: Check out the selected tag
+      - name: Check out the release tag
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
       - name: Set up stable Rust
@@ -32,21 +29,18 @@ jobs:
       - name: Validate tag and package version
         shell: bash
         env:
-          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          [[ "${RELEASE_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]] || {
-            echo "invalid release version: ${RELEASE_VERSION}" >&2
-            exit 1
-          }
           test "${GITHUB_REF_TYPE}" = tag || {
-            echo "run this workflow against tag v${RELEASE_VERSION}, not ${GITHUB_REF}" >&2
+            echo "expected a tag ref, not ${GITHUB_REF}" >&2
             exit 1
           }
-          test "${GITHUB_REF_NAME}" = "v${RELEASE_VERSION}" || {
-            echo "selected tag ${GITHUB_REF_NAME} does not match v${RELEASE_VERSION}" >&2
+          [[ "${RELEASE_TAG}" =~ ^v([0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?)$ ]] || {
+            echo "invalid release tag: ${RELEASE_TAG}" >&2
             exit 1
           }
+          RELEASE_VERSION="${BASH_REMATCH[1]}"
           package_version="$(cargo metadata --no-deps --format-version 1 \
             | jq -r '.packages[] | select(.name == "attestation-verify") | .version')"
           test "${package_version}" = "${RELEASE_VERSION}" || {
