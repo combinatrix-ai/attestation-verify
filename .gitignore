@@ -1,4 +1,5 @@
 target/
+.envrc
 
 # cargo-fuzz build output and crash/coverage artifacts.
 /fuzz/target/
