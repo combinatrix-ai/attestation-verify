@@ -13,3 +13,12 @@ coordinated disclosure is ready.
 Include the affected input shape, observed behavior, expected security
 property, and a minimal reproducer when possible. Never include credentials,
 private attestations, or other sensitive data in a report.
+
+## Release authorization
+
+`hmirin` is the sole authorized releaser. Release tag operations and publishing
+job approval are restricted by GitHub settings described in `RELEASING.md`.
+A tag push requests a release; it does not skip the required approval.
+Repository and organization administrators are trusted to maintain these
+protections. This policy does not defend against administrators changing the
+release authorization settings themselves.
