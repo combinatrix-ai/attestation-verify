@@ -66,8 +66,8 @@ jobs:
       - name: Test the locked release source
         run: cargo test --locked
 
-      - name: Verify the package without uploading
-        run: cargo publish --dry-run --locked
+      - name: Build and verify the release package without uploading
+        run: cargo package --locked
 
       - name: Record the verified package digest
         id: package

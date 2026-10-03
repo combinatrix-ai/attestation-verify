@@ -33,7 +33,7 @@ administrator from changing or removing the protections themselves.
 2. As `hmirin`, create and push the exact `v<version>` tag on that commit.
    `.github/workflows/publish.yml` starts automatically on `v*` tag pushes.
 3. The validation job checks the tag syntax and package-version equality,
-   runs the locked tests and publish dry-run without OIDC permission, and
+   runs the locked tests and package build verification without OIDC permission, and
    records the verified package's SHA-256 and exact Rust toolchain version.
 4. Inspect the tag and exact commit SHA, then approve the pending `crates-io`
    publishing job as `hmirin`. The job starts on a fresh runner, checks out the

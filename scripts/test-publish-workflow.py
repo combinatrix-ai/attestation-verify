@@ -25,6 +25,7 @@ class ReleaseBoundary(unittest.TestCase):
         validate = WORKFLOW["jobs"]["validate"]
         self.assertNotIn("id-token", validate["permissions"])
         self.assertNotIn("environment", validate)
+        self.assertIn("cargo package --locked", [s.get("run") for s in validate["steps"]])
         self.assertEqual(PUBLISH["needs"], "validate")
         self.assertEqual(PUBLISH["environment"], "crates-io")
         self.assertEqual(PUBLISH["permissions"]["id-token"], "write")
@@ -124,7 +125,9 @@ class ReleaseBoundary(unittest.TestCase):
                 subprocess.run(["git", *args], cwd=index, check=True, capture_output=True)
             result = cargo("publish", "--dry-run", "--no-verify", "--locked", "--index", index.as_uri())
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(archive.read_bytes(), expected)
+            # publish packages into tmp-crate; comparing the older .crate
+            # would not check the bytes that its dry-run would upload.
+            self.assertEqual((root / "target/package/tmp-crate/release-boundary-fixture-0.0.0.crate").read_bytes(), expected)
 
 
 if __name__ == "__main__":
