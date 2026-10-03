@@ -32,16 +32,29 @@ administrator from changing or removing the protections themselves.
    on the reviewed release commit. Check the package version in `Cargo.toml`.
 2. As `hmirin`, create and push the exact `v<version>` tag on that commit.
    `.github/workflows/publish.yml` starts automatically on `v*` tag pushes.
-3. Inspect the tag and exact commit SHA, then approve the pending `crates-io`
-   environment job as `hmirin`.
-4. The workflow checks the tag syntax and package-version equality, runs the
-   locked tests and publish dry-run, then authenticates through GitHub OIDC
-   Trusted Publishing and uploads the crate.
+3. The validation job checks the tag syntax and package-version equality,
+   runs the locked tests and publish dry-run without OIDC permission, and
+   records the verified package's SHA-256 and exact Rust toolchain version.
+4. Inspect the tag and exact commit SHA, then approve the pending `crates-io`
+   publishing job as `hmirin`. The job starts on a fresh runner, checks out the
+   same immutable commit, and uses the recorded Rust version. It rejects
+   repository Cargo configuration and uses a fresh Cargo home with the
+   built-in token credential provider. It packages without compiling and
+   requires the package digest to match before authenticating through OIDC.
+   The final upload uses `cargo publish --no-verify --locked`, with no tests
+   or build scripts executing in the OIDC-enabled job.
 5. Confirm the version appears on crates.io and docs.rs.
 
 Publishing is permanent. Do not rerun a completed version; bump the package
 version and create a new tag for any correction. Approval authorizes the
 selected release source, not merely a tag name.
+
+Cargo repackages during the final publish rather than uploading the earlier
+archive directly. The pinned authentication action is the only operation
+between the digest check and publish; keep release source and packaging
+inputs unchanged in that interval. A digest mismatch fails closed. Changes
+that introduce repository Cargo configuration require a security review of
+the publishing boundary rather than removing its rejection check.
 
 ## First release bootstrap
 

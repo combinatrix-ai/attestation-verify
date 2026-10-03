@@ -22,3 +22,9 @@ A tag push requests a release; it does not skip the required approval.
 Repository and organization administrators are trusted to maintain these
 protections. This policy does not defend against administrators changing the
 release authorization settings themselves.
+
+Release tests and package build verification must run without publishing or
+OIDC authority. Only the separate, approved publishing job may mint an OIDC
+token; it must not execute package tests, build scripts, proc macros, or
+repository-selected credential helpers. It must publish the same package
+content verified by the unprivileged job.
