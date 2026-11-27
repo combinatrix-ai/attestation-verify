@@ -1,28 +1,85 @@
 # attestation-verify
 
 [![CI](https://github.com/combinatrix-ai/attestation-verify/actions/workflows/ci.yml/badge.svg)](https://github.com/combinatrix-ai/attestation-verify/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/attestation-verify.svg)](https://crates.io/crates/attestation-verify)
+[![docs.rs](https://docs.rs/attestation-verify/badge.svg)](https://docs.rs/attestation-verify)
 
-Verify GitHub Artifact Attestations (Sigstore bundles) offline in Rust —
-minimal dependencies, sans-io, fail-closed.
+**Check that a downloaded file was built by the GitHub Actions workflow you
+trust, offline, from inside your Rust program.**
 
-## Status: functional, narrow scope
+GitHub can attach a signed build provenance ([Artifact
+Attestation](https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations))
+to every release asset. `attestation-verify` checks one of those bundles
+against the file you downloaded and a policy you write down in code: *this
+repository, this branch, this workflow file*. If anything does not match, you
+get an error, not a warning.
 
-This crate verifies, fully offline, against the embedded Sigstore
-public-good trust root (or a caller-supplied one):
+- **Offline and sans-io.** No network calls, no `gh` binary, no Go toolchain.
+  The Sigstore public-good trust root is embedded.
+- **Fail-closed, no knobs.** Every check always runs. Unsupported inputs return
+  a typed `Unsupported` error instead of being skipped.
+- **Small.** 54 unique dependencies in the default build.
 
-- `actions/attest-build-provenance`-generated bundles
-  (`application/vnd.dev.sigstore.bundle.v0.3+json`) carrying a
-  `https://slsa.dev/provenance/v1` predicate.
-- The full chain: DSSE envelope signature, Rekor v1 transparency-log
-  inclusion (SET + Merkle inclusion proof + checkpoint), X.509/Fulcio
-  certificate-chain validation, embedded SCT verification, and GitHub
-  identity-policy matching (source repository + ref, signer workflow
-  repository + path + revision).
+Typical uses: self-updaters that should only replace themselves with an
+official build, installers and package managers that fetch release binaries,
+and air-gapped machines that receive artifacts by hand.
 
-There are no verification knobs — every step above always runs. The caller
-must provide both the identity policy (`GithubPolicy`) and a non-empty exact
-checkpoint-origin policy (`CheckpointOriginPolicy`); the latter is validated
-against the selected trust store's log-key SPKI digests at builder time.
+## Try it: verify the real GitHub CLI release
+
+The repository ships the real provenance bundle that GitHub published for
+`gh` 2.96.0. Download the release tarball from GitHub and verify it:
+
+```sh
+git clone https://github.com/combinatrix-ai/attestation-verify
+cd attestation-verify
+curl -fsSLO https://github.com/cli/cli/releases/download/v2.96.0/gh_2.96.0_linux_amd64.tar.gz
+
+cargo run -q --example verify -- \
+    --artifact gh_2.96.0_linux_amd64.tar.gz \
+    --bundle tests/fixtures/github-cli/tarball-user-slsa-provenance.json \
+    --repo cli/cli --owner-id 59704711 --repo-id 212613049 \
+    --source-ref refs/heads/trunk \
+    --signer-workflow .github/workflows/deployment.yml \
+    --checkpoint-origin 'rekor.sigstore.dev - 1193050959916656506'
+```
+
+```text
+verified: subject 83d5c2ccad5498f58bf6368acb1ab32588cf43ab3a4b1c301bf36328b1c8bd60 (gh_2.96.0_linux_amd64.tar.gz)
+  source:  cli/cli @ refs/heads/trunk
+  signer:  cli/cli .github/workflows/deployment.yml
+  transparency: integratedTime=1783027755 logIndex=2049189324
+  trust root:   embedded-public-good efe219604a80ad73be4c010b799cfcc3bd85c4fc37ff54f701ae4db7ebdeef95
+```
+
+Now change a single byte of the tarball and run the same command:
+
+```text
+error: content binding error: subject digest not found in statement
+```
+
+A checksum would catch that too. The more interesting case is a genuine file
+with a valid signature that came from a different build path. Put the original
+tarball back and expect `.github/workflows/release.yml` instead:
+
+```text
+error: policy error: signer workflow path mismatch: expected .github/workflows/release.yml, found .github/workflows/deployment.yml
+```
+
+The signature is valid, but this is not the build path you decided to trust,
+so verification fails. That is the decision an updater needs to make before it
+replaces a binary.
+
+## Install
+
+```sh
+cargo add attestation-verify
+```
+
+The minimum supported Rust version is 1.88.
+
+## Use it in your code
+
+Write the policy once, then verify each artifact against it:
 
 ```rust
 use attestation_verify::{Bundle, CheckpointOriginPolicy, GithubPolicy, RefPolicy, RepositoryIdentity};
@@ -63,33 +120,47 @@ let report = verifier.verify_bytes(&artifact_bytes, &bundle)?;
 println!("{} @ {}", report.signer.source_repository, report.signer.source_ref);
 ```
 
-See `examples/verify.rs` for a small, dependency-free CLI wrapping the
-same API — run it with:
+The caller must provide both the identity policy (`GithubPolicy`) and a
+non-empty exact checkpoint-origin policy (`CheckpointOriginPolicy`); the
+latter is validated against the selected trust store's log-key SPKI digests
+at builder time. [`examples/verify.rs`](examples/verify.rs) is the
+dependency-free CLI used above, built only on this public API. It also accepts
+a JSON Lines file holding a single bundle, such as one written by
+`gh attestation download`. The full API is on
+[docs.rs](https://docs.rs/attestation-verify).
 
-```sh
-cargo run --example verify -- \
-    --artifact gh_2.96.0_linux_amd64.tar.gz \
-    --bundle tests/fixtures/github-cli/tarball-user-slsa-provenance.json \
-    --repo cli/cli --owner-id 59704711 --repo-id 212613049 \
-    --source-ref refs/heads/trunk \
-    --signer-workflow .github/workflows/deployment.yml \
-    --checkpoint-origin 'rekor.sigstore.dev - 1193050959916656506'
-```
+## What is verified
 
-## v0.2 boundaries (out of scope today, typed `Unsupported` errors, never
-silently accepted)
+Every call runs the whole chain against the embedded Sigstore public-good
+trust root (or a caller-supplied one):
+
+- Bundles generated by `actions/attest-build-provenance`
+  (`application/vnd.dev.sigstore.bundle.v0.3+json`) carrying a
+  `https://slsa.dev/provenance/v1` predicate.
+- The artifact's SHA-256 digest against the attested subject.
+- The DSSE envelope signature.
+- Rekor v1 transparency-log inclusion: SET, Merkle inclusion proof, and
+  checkpoint.
+- The X.509/Fulcio certificate chain and the embedded SCT.
+- GitHub identity policy: source repository and ref, plus signer workflow
+  repository, path, and revision.
+
+## Not supported yet
+
+These inputs return typed `Unsupported` errors and are never silently
+accepted:
 
 - GitHub's own TSA-timestamped release-attestation flavor (`initiator:
   github`: no tlog entries, RFC 3161 timestamp, GitHub's own Fulcio/TSA
   trust root, predicate `https://in-toto.io/attestation/release/v0.2`).
-- Rekor v2 (Ed25519, tiles/sharded logs) — this crate detects and rejects
-  v2 entries rather than misinterpreting them; only Rekor v1 is verified.
-- Private-repository attestations (different trust root; kept possible
-  via root injection, not implemented).
+- Rekor v2 (Ed25519, tiles/sharded logs). This crate detects and rejects v2
+  entries rather than misinterpreting them; only Rekor v1 is verified.
+- Private-repository attestations (different trust root; kept possible via
+  root injection, not implemented).
 - Any predicate type other than `https://slsa.dev/provenance/v1`.
 
-See [DESIGN.md](DESIGN.md) for the full design, the normative
-time-evidence model, and the roadmap.
+See [DESIGN.md](DESIGN.md) for the full design, the normative time-evidence
+model, and the roadmap.
 
 ## Sigstore conformance gate
 
